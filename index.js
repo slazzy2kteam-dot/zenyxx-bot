@@ -2,7 +2,9 @@ const {
   Client,
   GatewayIntentBits,
   Partials,
-  EmbedBuilder
+  EmbedBuilder,
+  SlashCommandBuilder,
+  PermissionFlagsBits
 } = require("discord.js");
 
 const express = require('express');
@@ -43,9 +45,103 @@ async function sendLog(guild, title, description) {
   await channel.send({ embeds: [embed] }).catch(() => {});
 }
 
+// ===== Définition des commandes slash =====
+const commands = [
+  new SlashCommandBuilder()
+    .setName("kick")
+    .setDescription("Expulse un membre du serveur")
+    .addUserOption(option =>
+      option.setName("membre").setDescription("Le membre à expulser").setRequired(true)
+    )
+    .addStringOption(option =>
+      option.setName("raison").setDescription("Raison de l'expulsion").setRequired(false)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.KickMembers),
+
+  new SlashCommandBuilder()
+    .setName("ban")
+    .setDescription("Bannit un membre du serveur")
+    .addUserOption(option =>
+      option.setName("membre").setDescription("Le membre à bannir").setRequired(true)
+    )
+    .addStringOption(option =>
+      option.setName("raison").setDescription("Raison du bannissement").setRequired(false)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers),
+
+  new SlashCommandBuilder()
+    .setName("clear")
+    .setDescription("Supprime un nombre de messages dans le salon")
+    .addIntegerOption(option =>
+      option.setName("nombre").setDescription("Nombre de messages à supprimer (1-100)").setRequired(true)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+].map(command => command.toJSON());
+
 // Connexion du bot
-client.once("ready", () => {
+client.once("ready", async () => {
   console.log(`✅ ${client.user.tag} est connecté !`);
+
+  try {
+    await client.application.commands.set(commands);
+    console.log("✅ Commandes slash enregistrées !");
+  } catch (error) {
+    console.error("Erreur lors de l'enregistrement des commandes :", error);
+  }
+});
+
+// ===== Gestion des commandes slash =====
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const { commandName, guild, member, options } = interaction;
+
+  if (commandName === "kick") {
+    const target = options.getUser("membre");
+    const raison = options.getString("raison") || "Aucune raison fournie";
+    const targetMember = await guild.members.fetch(target.id).catch(() => null);
+
+    if (!targetMember) {
+      return interaction.reply({ content: "Membre introuvable.", ephemeral: true });
+    }
+    if (!targetMember.kickable) {
+      return interaction.reply({ content: "Je ne peux pas expulser ce membre.", ephemeral: true });
+    }
+
+    await targetMember.kick(raison);
+    await interaction.reply(`👢 **${target.tag}** a été expulsé. Raison : ${raison}`);
+    sendLog(guild, "👢 Membre expulsé", `**${target.tag}** expulsé par **${member.user.tag}**\nRaison : ${raison}`);
+  }
+
+  if (commandName === "ban") {
+    const target = options.getUser("membre");
+    const raison = options.getString("raison") || "Aucune raison fournie";
+    const targetMember = await guild.members.fetch(target.id).catch(() => null);
+
+    if (targetMember && !targetMember.bannable) {
+      return interaction.reply({ content: "Je ne peux pas bannir ce membre.", ephemeral: true });
+    }
+
+    await guild.members.ban(target.id, { reason: raison });
+    await interaction.reply(`🔨 **${target.tag}** a été banni. Raison : ${raison}`);
+    sendLog(guild, "🔨 Membre banni", `**${target.tag}** banni par **${member.user.tag}**\nRaison : ${raison}`);
+  }
+
+  if (commandName === "clear") {
+    const nombre = options.getInteger("nombre");
+
+    if (nombre < 1 || nombre > 100) {
+      return interaction.reply({ content: "Choisis un nombre entre 1 et 100.", ephemeral: true });
+    }
+
+    const deleted = await interaction.channel.bulkDelete(nombre, true).catch(() => null);
+    if (!deleted) {
+      return interaction.reply({ content: "Impossible de supprimer ces messages (trop vieux de 14 jours ?).", ephemeral: true });
+    }
+
+    await interaction.reply({ content: `🧹 ${deleted.size} messages supprimés.`, ephemeral: true });
+    sendLog(guild, "🧹 Messages supprimés", `**${deleted.size}** messages supprimés par **${member.user.tag}** dans ${interaction.channel}`);
+  }
 });
 
 // Membre rejoint
@@ -94,7 +190,7 @@ client.on("messageUpdate", (oldMessage, newMessage) => {
   );
 });
 
-// Ban
+// Ban (via l'interface Discord directement, pas la commande)
 client.on("guildBanAdd", ban => {
   sendLog(
     ban.guild,
