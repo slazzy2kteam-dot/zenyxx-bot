@@ -9,7 +9,8 @@ const {
   StringSelectMenuBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ChannelType
+  ChannelType,
+  AttachmentBuilder
 } = require("discord.js");
 
 const express = require('express');
@@ -83,12 +84,16 @@ function getRolesForCategory(guild, category) {
 }
 
 function buildTicketPanel() {
+  // Bannière ZenyXx jointe depuis le dossier assets/ du projet
+  const banniere = new AttachmentBuilder("./assets/zenyxx_banner.png");
+
   const embed = new EmbedBuilder()
     .setTitle("🎫 Support — Ouvrir un ticket")
     .setDescription(
       "Sélectionnez le type de demande ci-dessous pour ouvrir un ticket :\n\n" +
       TICKET_CATEGORIES.map(c => `${c.emoji} — **${c.label}**`).join("\n")
     )
+    .setImage("attachment://zenyxx_banner.png")
     .setColor(0x5865F2);
 
   const selectMenu = new StringSelectMenuBuilder()
@@ -104,7 +109,7 @@ function buildTicketPanel() {
 
   const row = new ActionRowBuilder().addComponents(selectMenu);
 
-  return { embeds: [embed], components: [row] };
+  return { embeds: [embed], components: [row], files: [banniere] };
 }
 
 // ===== Commandes slash =====
