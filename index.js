@@ -14,6 +14,8 @@ const {
   AuditLogEvent
 } = require("discord.js");
 
+const { createTranscript } = require("discord-html-transcripts");
+
 const express = require('express');
 const app = express();
 app.get('/', (req, res) => res.send('Bot en ligne !'));
@@ -373,7 +375,29 @@ if (interaction.isStringSelectMenu() && interaction.customId === "candidature_su
   if (interaction.isButton() && interaction.customId === "close_ticket") {
     await interaction.reply({ content: "🔒 Ce ticket sera fermé dans 5 secondes..." });
 
-    sendLog(guild, "🔒 Ticket fermé", `Ticket **${interaction.channel.name}** fermé par **${member.user.tag}**`, TICKET_LOG_CHANNEL_NAME);
+    const ticketLogChannel = getLogChannel(guild, TICKET_LOG_CHANNEL_NAME);
+
+    if (ticketLogChannel) {
+      try {
+        const transcript = await createTranscript(interaction.channel, {
+          limit: -1,
+          returnType: "attachment",
+          filename: `transcript-${interaction.channel.name}.html`,
+          saveImages: true,
+          poweredBy: false
+        });
+
+        const closeEmbed = new EmbedBuilder()
+          .setTitle("🔒 Ticket fermé")
+          .setDescription(`Ticket **${interaction.channel.name}** fermé par **${member.user.tag}**`)
+          .setTimestamp();
+
+        await ticketLogChannel.send({ embeds: [closeEmbed], files: [transcript] });
+      } catch (error) {
+        console.error("Erreur lors de la génération du transcript :", error);
+        sendLog(guild, "🔒 Ticket fermé", `Ticket **${interaction.channel.name}** fermé par **${member.user.tag}**\n(⚠️ transcript non généré, voir les logs du bot)`, TICKET_LOG_CHANNEL_NAME);
+      }
+    }
 
     setTimeout(() => {
       interaction.channel.delete().catch(() => {});
