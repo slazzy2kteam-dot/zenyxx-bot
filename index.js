@@ -463,11 +463,20 @@ client.on("guildMemberAdd", member => {
 
   const welcomeChannel = getLogChannel(member.guild, WELCOME_CHANNEL_NAME);
   if (welcomeChannel) {
+    const accountAgeDays = Math.floor((Date.now() - member.user.createdTimestamp) / (1000 * 60 * 60 * 24));
+
     const welcomeEmbed = new EmbedBuilder()
-      .setTitle("🖐️ Bienvenue !")
-      .setDescription(`Bienvenue ${member} sur le serveur !\nNous sommes maintenant **${member.guild.memberCount}** membres.`)
-      .setThumbnail(member.user.displayAvatarURL())
+      .setAuthor({ name: member.user.tag, iconURL: member.user.displayAvatarURL() })
+      .setTitle("🎉 Nouveau membre sur le serveur !")
+      .setDescription(`🎉 Bienvenue ${member} sur **${member.guild.name}** !`)
+      .addFields(
+        { name: "🆔 ID", value: `${member.user.id}` },
+        { name: "🕒 Compte créé", value: `il y a ${accountAgeDays} jour${accountAgeDays !== 1 ? "s" : ""}` },
+        { name: "📥 Rejoint", value: `<t:${Math.floor(Date.now() / 1000)}:F>` }
+      )
+      .setThumbnail(member.user.displayAvatarURL({ size: 256 }))
       .setColor(0x57F287)
+      .setFooter({ text: `Membre #${member.guild.memberCount} | ${member.guild.name}` })
       .setTimestamp();
 
     welcomeChannel.send({ content: `${member}`, embeds: [welcomeEmbed] }).catch(() => {});
@@ -485,10 +494,16 @@ client.on("guildMemberRemove", member => {
   const goodbyeChannel = getLogChannel(member.guild, GOODBYE_CHANNEL_NAME);
   if (goodbyeChannel) {
     const goodbyeEmbed = new EmbedBuilder()
-      .setTitle("✈️ Au revoir !")
-      .setDescription(`**${member.user.tag}** vient de quitter le serveur.\nNous sommes maintenant **${member.guild.memberCount}** membres.`)
-      .setThumbnail(member.user.displayAvatarURL())
+      .setAuthor({ name: member.user.tag, iconURL: member.user.displayAvatarURL() })
+      .setTitle("😢 Un membre nous quitte...")
+      .setDescription(`**${member.user.tag}** a quitté **${member.guild.name}**.`)
+      .addFields(
+        { name: "🆔 ID", value: `${member.user.id}` },
+        { name: "👥 Membres restants", value: `${member.guild.memberCount}` }
+      )
+      .setThumbnail(member.user.displayAvatarURL({ size: 256 }))
       .setColor(0xED4245)
+      .setFooter({ text: member.guild.name })
       .setTimestamp();
 
     goodbyeChannel.send({ embeds: [goodbyeEmbed] }).catch(() => {});
