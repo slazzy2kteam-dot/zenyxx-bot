@@ -56,15 +56,7 @@ async function sendLog(guild, title, description, channelName = LOG_CHANNEL_NAME
   await channel.send({ embeds: [embed] }).catch(() => {});
 }
 
-// ===== Génération du transcript de ticket =====
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
+// ===== Génération du transcript de ticket (texte simple) =====
 async function generateTranscript(channel) {
   let allMessages = [];
   let lastId = null;
@@ -81,54 +73,36 @@ async function generateTranscript(channel) {
 
   allMessages.reverse(); // du plus ancien au plus récent
 
-  const rows = allMessages.map(msg => {
+  const lines = allMessages.map(msg => {
     const time = msg.createdAt.toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" });
-    const avatar = msg.author.displayAvatarURL({ extension: "png", size: 64 });
-    const name = escapeHtml(msg.author.tag);
-    const content = escapeHtml(msg.content || "").replace(/\n/g, "<br>");
 
-    const attachments = [...msg.attachments.values()].map(a =>
-      (a.contentType && a.contentType.startsWith("image/"))
-        ? `<img src="${a.url}" class="attachment-img">`
-        : `<a href="${a.url}" target="_blank">📎 ${escapeHtml(a.name)}</a>`
-    ).join("<br>");
+    let content = msg.content || "";
 
-    return `
-      <div class="message">
-        <img class="avatar" src="${avatar}">
-        <div class="content">
-          <div class="meta"><span class="author">${name}</span><span class="time">${time}</span></div>
-          ${content ? `<div class="text">${content}</div>` : ""}
-          ${attachments ? `<div class="attachments">${attachments}</div>` : ""}
-        </div>
-      </div>`;
-  }).join("\n");
+    // Résout les mentions @membre, @rôle et #salon en texte lisible
+    for (const [id, user] of msg.mentions.users) {
+      content = content.replace(new RegExp(`<@!?${id}>`, "g"), `@${user.username}`);
+    }
+    for (const [id, role] of msg.mentions.roles) {
+      content = content.replace(new RegExp(`<@&${id}>`, "g"), `@${role.name}`);
+    }
+    for (const [id, channelMention] of msg.mentions.channels) {
+      content = content.replace(new RegExp(`<#${id}>`, "g"), `#${channelMention.name}`);
+    }
 
-  return `<!DOCTYPE html>
-<html lang="fr">
-<head>
-<meta charset="UTF-8">
-<title>Transcript — ${escapeHtml(channel.name)}</title>
-<style>
-  body { background:#313338; color:#dbdee1; font-family: 'Segoe UI', Helvetica, Arial, sans-serif; margin:0; padding:24px; }
-  h1 { color:#fff; border-bottom: 2px solid #5865F2; padding-bottom:12px; margin-bottom:20px; }
-  .message { display:flex; gap:14px; padding:10px 12px; border-radius:8px; margin-bottom:4px; }
-  .message:hover { background:#2b2d31; }
-  .avatar { width:40px; height:40px; border-radius:50%; flex-shrink:0; }
-  .meta { margin-bottom:3px; }
-  .author { font-weight:600; color:#fff; }
-  .time { color:#949ba4; font-size:12px; margin-left:8px; }
-  .text { white-space:pre-wrap; line-height:1.45; word-break:break-word; }
-  .attachment-img { max-width:320px; border-radius:6px; margin-top:6px; display:block; }
-  .attachments a { color:#00a8fc; text-decoration:none; }
-  .attachments a:hover { text-decoration:underline; }
-</style>
-</head>
-<body>
-<h1>🎫 Transcript — ${escapeHtml(channel.name)}</h1>
-${rows || "<p>Aucun message dans ce ticket.</p>"}
-</body>
-</html>`;
+    const attachments = [...msg.attachments.values()]
+      .map(a => `[Fichier joint : ${a.name} — ${a.url}]`)
+      .join("\n");
+
+    let line = `[${time}] ${msg.author.tag} : ${content}`;
+    if (attachments) line += `\n${attachments}`;
+    return line;
+  });
+
+  const header =
+    `Transcript du ticket : ${channel.name}\n` +
+    `${"=".repeat(50)}\n\n`;
+
+  return header + (lines.length ? lines.join("\n\n") : "Aucun message dans ce ticket.");
 }
 
 // ===== Configuration des tickets =====
@@ -452,9 +426,9 @@ if (interaction.isStringSelectMenu() && interaction.customId === "candidature_su
 
     if (ticketLogChannel) {
       try {
-        const html = await generateTranscript(interaction.channel);
-        const transcript = new AttachmentBuilder(Buffer.from(html, "utf-8"), {
-          name: `transcript-${interaction.channel.name}.html`
+        const transcriptText = await generateTranscript(interaction.channel);
+        const transcript = new AttachmentBuilder(Buffer.from(transcriptText, "utf-8"), {
+          name: `transcript-${interaction.channel.name}.txt`
         });
 
         const closeEmbed = new EmbedBuilder()
