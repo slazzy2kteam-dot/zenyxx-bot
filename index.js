@@ -19,19 +19,18 @@ const express = require("express");
 const fs = require("fs");
 
 // ======================================================
-// CONFIGURATION
+// SERVEUR HTTP
 // ======================================================
 
-const TOKEN = process.env.TOKEN;
+const app = express();
 
-const LOG_CHANNEL_NAME = "📋・logs";
-const TICKET_LOG_CHANNEL_NAME = "🚫-logs-tickets";
-const MOD_LOG_CHANNEL_NAME = "🚫-logs-moderation";
-const ARRIVAL_CHANNEL_NAME = "🔨-arrivé-des-membres";
-const GOODBYE_CHANNEL_NAME = "✈️・𝗮𝘂𝗿𝗲𝘃𝗼𝗶𝗿";
-const WELCOME_CHANNEL_NAME = "👋-bienvenue";
+app.get("/", (req, res) => {
+  res.send("Bot en ligne !");
+});
 
-const CASE_FILE = "./cases.json";
+app.listen(process.env.PORT || 3000, () => {
+  console.log("Serveur HTTP demarre");
+});
 
 // ======================================================
 // CLIENT DISCORD
@@ -46,406 +45,899 @@ const client = new Client({
     GatewayIntentBits.GuildModeration
   ],
   partials: [
-    Partials.Channel,
     Partials.Message,
-    Partials.User,
-    Partials.GuildMember
+    Partials.Channel
   ]
 });
 
 // ======================================================
-// EXPRESS KEEP ALIVE
+// CONFIGURATION
 // ======================================================
 
-const app = express();
+const LOG_CHANNEL_NAME = "📋・logs";
+const TICKET_LOG_CHANNEL_NAME = "🚫-logs-tickets";
+const MODERATION_LOG_CHANNEL_NAME = "🚫-logs-moderation";
+const WELCOME_CHANNEL_NAME = "🔨-arrivé-des-membres";
+const GOODBYE_CHANNEL_NAME = "✈️・𝗮𝘂𝗿𝗲𝘃𝗼𝗶𝗿";
+const PUBLIC_WELCOME_CHANNEL_NAME = "👋-bienvenue";
 
-app.get("/", (req, res) => {
-  res.send("Bot Discord opérationnel !");
-});
+const CASE_FILE = "./cases.json";
 
-const PORT = process.env.PORT || 3000;
+const MAX_EMBED_FIELD = 1024;
 
-app.listen(PORT, () => {
-  console.log(`Serveur web lancé sur le port ${PORT}`);
-});
-
-// ======================================================
-// DONNÉES DES TICKETS
-// ======================================================
-
-const ticketCategories = {
-  "candidature": {
-    label: "Candidature",
-    emoji: "📩",
-    description: "Pour postuler au staff"
-  },
-
-  "aide": {
-    label: "Aide",
-    emoji: "❓",
-    description: "Besoin d'aide"
-  },
-
-  "plainte": {
-    label: "Plainte",
-    emoji: "⚠️",
-    description: "Signaler un problème"
-  },
-
-  "autre": {
-    label: "Autre",
-    emoji: "📌",
-    description: "Autre demande"
-  }
-};
-
-const candidatureCategories = {
-  "twitch": "Twitch",
-  "youtube": "YouTube",
-  "discord": "Discord",
-  "tiktok": "TikTok"
-};
 
 // ======================================================
-// STOCKAGE DES TEMPBAN
+// ACTIONS DU BOT
+// Permet d'éviter les doubles logs
 // ======================================================
 
-const guildData = new Map();
+const botActions = new Map();
 
-// ======================================================
-// CASES
-// ======================================================
-
-let casesData = {
-  nextCase: 1,
-  cases: []
-};
-
-if (fs.existsSync(CASE_FILE)) {
-  try {
-    casesData = JSON.parse(fs.readFileSync(CASE_FILE, "utf8"));
-
-    if (!casesData.nextCase) {
-      casesData.nextCase = 1;
-    }
-
-    if (!Array.isArray(casesData.cases)) {
-      casesData.cases = [];
-    }
-  } catch (error) {
-    console.error("Impossible de lire cases.json :", error);
-  }
+function actionKey(guildId, userId, action) {
+  return `${guildId}:${userId}:${action}`;
 }
 
-function saveCases() {
-  try {
-    fs.writeFileSync(
-      CASE_FILE,
-      JSON.stringify(casesData, null, 2)
-    );
-  } catch (error) {
-    console.error("Erreur sauvegarde cases :", error);
-  }
-}
-
-function createCase({
-  guild,
-  user,
-  moderator,
+function markBotAction(
+  guildId,
+  userId,
   action,
-  reason,
-  duration = null,
-  expiresAt = null,
-  proof = null
-}) {
-  const caseId = casesData.nextCase++;
-
-  const newCase = {
-    id: caseId,
-    guildId: guild.id,
-    userId: user.id,
-    userTag: user.tag,
-    moderatorId: moderator?.id || null,
-    moderatorTag: moderator?.tag || "Inconnu",
-    action,
-    reason: reason || "Aucune raison fournie",
-    duration,
-    expiresAt,
-    proof,
-    createdAt: Date.now()
-  };
-
-  casesData.cases.push(newCase);
-
-  saveCases();
-
-  return newCase;
-}
-
-function getCase(caseId, guildId) {
-  return casesData.cases.find(
-    c => c.id === Number(caseId) && c.guildId === guildId
+  ttl = 15000
+) {
+  const key = actionKey(
+    guildId,
+    userId,
+    action
   );
+
+  botActions.set(
+    key,
+    Date.now() + ttl
+  );
+
+  setTimeout(() => {
+    botActions.delete(key);
+  }, ttl + 1000);
 }
 
+function consumeBotAction(
+  guildId,
+  userId,
+  action
+) {
+  const key = actionKey(
+    guildId,
+    userId,
+    action
+  );
+
+  const expires =
+    botActions.get(key);
+
+  if (!expires) {
+    return false;
+  }
+
+  botActions.delete(key);
+
+  return expires >= Date.now();
+}
+
+
 // ======================================================
-// OUTILS
+// SALONS
 // ======================================================
 
-function getLogChannel(guild, name) {
+function getLogChannel(
+  guild,
+  channelName = LOG_CHANNEL_NAME
+) {
   return guild.channels.cache.find(
     channel =>
-      channel.name === name &&
-      channel.type === ChannelType.GuildText
+      channel.name === channelName &&
+      channel.isTextBased()
   );
 }
 
-function formatDuration(ms) {
-  if (!ms) return "Permanent";
 
-  let seconds = Math.floor(ms / 1000);
+// ======================================================
+// UTILITAIRES
+// ======================================================
 
-  const weeks = Math.floor(seconds / 604800);
-  seconds %= 604800;
+function cleanText(
+  value,
+  fallback = "Aucune information"
+) {
+  const text =
+    String(
+      value ?? fallback
+    ).trim() || fallback;
 
-  const days = Math.floor(seconds / 86400);
-  seconds %= 86400;
+  if (
+    text.length >
+    MAX_EMBED_FIELD
+  ) {
+    return (
+      text.slice(
+        0,
+        MAX_EMBED_FIELD - 3
+      ) + "..."
+    );
+  }
 
-  const hours = Math.floor(seconds / 3600);
-  seconds %= 3600;
+  return text;
+}
 
-  const minutes = Math.floor(seconds / 60);
-  seconds %= 60;
+
+function formatDiscordDate(date) {
+  return `<t:${Math.floor(
+    new Date(date).getTime() / 1000
+  )}:F>`;
+}
+
+
+// ======================================================
+// LOG SIMPLE
+// ======================================================
+
+async function sendLog(
+  guild,
+  title,
+  description,
+  channelName = LOG_CHANNEL_NAME,
+  fields = [],
+  color = 0x5865F2
+) {
+  const channel =
+    getLogChannel(
+      guild,
+      channelName
+    );
+
+  if (!channel) {
+    return;
+  }
+
+  const embed =
+    new EmbedBuilder()
+      .setTitle(title)
+      .setColor(color)
+      .setTimestamp();
+
+  if (description) {
+    embed.setDescription(
+      cleanText(
+        description,
+        ""
+      )
+    );
+  }
+
+  if (fields.length) {
+    embed.addFields(
+      fields.map(field => ({
+        ...field,
+        value: cleanText(
+          field.value
+        )
+      }))
+    );
+  }
+
+  await channel.send({
+    embeds: [embed]
+  }).catch(() => {});
+}
+
+
+// ======================================================
+// SYSTÈME DE CASES
+// ======================================================
+
+function loadCaseData() {
+  try {
+
+    if (!fs.existsSync(CASE_FILE)) {
+
+      const initial = {};
+
+      fs.writeFileSync(
+        CASE_FILE,
+        JSON.stringify(
+          initial,
+          null,
+          2
+        )
+      );
+
+      return initial;
+    }
+
+    const data =
+      JSON.parse(
+        fs.readFileSync(
+          CASE_FILE,
+          "utf8"
+        )
+      );
+
+    // Compatibilité avec un ancien cases.json
+    for (
+      const [guildId, value]
+      of Object.entries(data)
+    ) {
+
+      if (
+        typeof value ===
+        "number"
+      ) {
+
+        data[guildId] = {
+          nextCase: value,
+          cases: [],
+          tempbans: []
+        };
+
+      } else {
+
+        data[guildId] ??= {};
+
+        data[guildId].nextCase ??=
+          223;
+
+        data[guildId].cases ??=
+          [];
+
+        data[guildId].tempbans ??=
+          [];
+      }
+    }
+
+    return data;
+
+  } catch (error) {
+
+    console.error(
+      "Erreur lecture cases.json :",
+      error
+    );
+
+    return {};
+  }
+}
+
+
+function saveCaseData(data) {
+
+  try {
+
+    fs.writeFileSync(
+      CASE_FILE,
+      JSON.stringify(
+        data,
+        null,
+        2
+      )
+    );
+
+  } catch (error) {
+
+    console.error(
+      "Erreur écriture cases.json :",
+      error
+    );
+  }
+}
+
+
+function getGuildCaseData(
+  guildId,
+  data = loadCaseData()
+) {
+
+  data[guildId] ??= {
+    nextCase: 223,
+    cases: [],
+    tempbans: []
+  };
+
+  data[guildId].nextCase ??=
+    223;
+
+  data[guildId].cases ??=
+    [];
+
+  data[guildId].tempbans ??=
+    [];
+
+  return data[guildId];
+}
+
+
+function createCase(
+  guildId,
+  caseInfo
+) {
+
+  const data =
+    loadCaseData();
+
+  const guildData =
+    getGuildCaseData(
+      guildId,
+      data
+    );
+
+  guildData.nextCase++;
+
+  const record = {
+    case:
+      guildData.nextCase,
+
+    createdAt:
+      Date.now(),
+
+    ...caseInfo
+  };
+
+  guildData.cases.push(
+    record
+  );
+
+  saveCaseData(data);
+
+  return record.case;
+}
+
+
+// ======================================================
+// WARNINGS
+// ======================================================
+
+function getWarnings(
+  guildId,
+  userId
+) {
+
+  const data =
+    loadCaseData();
+
+  const guildData =
+    getGuildCaseData(
+      guildId,
+      data
+    );
+
+  return guildData.cases.filter(
+    c =>
+      c.type === "warn" &&
+      c.userId === userId
+  );
+}
+
+
+function clearWarnings(
+  guildId,
+  userId
+) {
+
+  const data =
+    loadCaseData();
+
+  const guildData =
+    getGuildCaseData(
+      guildId,
+      data
+    );
+
+  const before =
+    guildData.cases.length;
+
+  guildData.cases =
+    guildData.cases.filter(
+      c =>
+        !(
+          c.type === "warn" &&
+          c.userId === userId
+        )
+    );
+
+  saveCaseData(data);
+
+  return (
+    before -
+    guildData.cases.length
+  );
+}
+
+
+function findCase(
+  guildId,
+  caseNumber
+) {
+
+  const data =
+    loadCaseData();
+
+  const guildData =
+    getGuildCaseData(
+      guildId,
+      data
+    );
+
+  return guildData.cases.find(
+    c =>
+      Number(c.case) ===
+      Number(caseNumber)
+  );
+}
+
+
+// ======================================================
+// DURÉES
+//
+// Exemples acceptés :
+// 30s
+// 5m
+// 2h
+// 1d
+// 4d
+// 7d
+// 14d
+// 28d
+// 1w
+// 1j
+// 4jours
+// ======================================================
+
+function parseDuration(
+  input
+) {
+
+  if (!input) {
+    return null;
+  }
+
+  const value =
+    String(input)
+      .trim()
+      .toLowerCase()
+      .replace(
+        /\s+/g,
+        ""
+      );
+
+  const match =
+    value.match(
+      /^(\d+)(s|sec|m|min|h|heure|heures|d|j|jour|jours|w|sem|semaine|semaines)$/
+    );
+
+  if (!match) {
+    return null;
+  }
+
+  const amount =
+    Number(match[1]);
+
+  const unit =
+    match[2];
+
+  const multiplier =
+
+    ["s", "sec"].includes(unit)
+      ? 1000
+
+      : ["m", "min"].includes(unit)
+      ? 60 * 1000
+
+      : [
+          "h",
+          "heure",
+          "heures"
+        ].includes(unit)
+      ? 60 * 60 * 1000
+
+      : [
+          "d",
+          "j",
+          "jour",
+          "jours"
+        ].includes(unit)
+      ? 24 * 60 * 60 * 1000
+
+      : 7 *
+        24 *
+        60 *
+        60 *
+        1000;
+
+  return amount * multiplier;
+}
+
+
+function formatDuration(
+  ms
+) {
+
+  let remaining =
+    Math.max(
+      0,
+      Number(ms)
+    );
 
   const parts = [];
 
-  if (weeks) parts.push(`${weeks} semaine${weeks > 1 ? "s" : ""}`);
-  if (days) parts.push(`${days} jour${days > 1 ? "s" : ""}`);
-  if (hours) parts.push(`${hours} heure${hours > 1 ? "s" : ""}`);
-  if (minutes) parts.push(`${minutes} minute${minutes > 1 ? "s" : ""}`);
-  if (seconds) parts.push(`${seconds} seconde${seconds > 1 ? "s" : ""}`);
+  const units = [
 
-  return parts.join(", ") || "Moins d'une seconde";
-}
+    [
+      7 *
+      24 *
+      60 *
+      60 *
+      1000,
 
-function parseDuration(input) {
-  if (!input) return null;
+      "semaine",
+      "semaines"
+    ],
 
-  const match = input
-    .toLowerCase()
-    .trim()
-    .match(/^(\d+)\s*(s|sec|secs|m|min|mins|h|hr|hrs|d|j|jour|jours|w|sem|semaine|semaines)$/);
+    [
+      24 *
+      60 *
+      60 *
+      1000,
 
-  if (!match) return null;
+      "jour",
+      "jours"
+    ],
 
-  const value = Number(match[1]);
-  const unit = match[2];
+    [
+      60 *
+      60 *
+      1000,
 
-  let multiplier;
+      "heure",
+      "heures"
+    ],
 
-  if (["s", "sec", "secs"].includes(unit)) {
-    multiplier = 1000;
-  } else if (["m", "min", "mins"].includes(unit)) {
-    multiplier = 60 * 1000;
-  } else if (["h", "hr", "hrs"].includes(unit)) {
-    multiplier = 60 * 60 * 1000;
-  } else if (
-    ["d", "j", "jour", "jours"].includes(unit)
+    [
+      60 *
+      1000,
+
+      "minute",
+      "minutes"
+    ],
+
+    [
+      1000,
+
+      "seconde",
+      "secondes"
+    ]
+  ];
+
+  for (
+    const [
+      size,
+      one,
+      many
+    ]
+    of units
   ) {
-    multiplier = 24 * 60 * 60 * 1000;
-  } else {
-    multiplier = 7 * 24 * 60 * 60 * 1000;
+
+    if (
+      remaining >= size
+    ) {
+
+      const amount =
+        Math.floor(
+          remaining / size
+        );
+
+      remaining %=
+        size;
+
+      parts.push(
+        `${amount} ${
+          amount === 1
+            ? one
+            : many
+        }`
+      );
+    }
+
+    if (
+      parts.length >= 2
+    ) {
+      break;
+    }
   }
 
-  return value * multiplier;
+  return parts.length
+    ? parts.join(" et ")
+    : "0 seconde";
 }
 
+
 // ======================================================
-// LOG MODÉRATION
+// LOG DE MODÉRATION
 // ======================================================
 
 async function sendModerationLog({
   guild,
-  action,
-  target,
+  title,
+  color,
+  type,
+  memberUser,
   moderator,
-  reason,
+  reason = "Aucune raison fournie",
   duration = null,
-  expiresAt = null,
+  expires = null,
   proof = null,
-  caseData = null
+  extraFields = []
 }) {
-  const channel = getLogChannel(
-    guild,
-    MOD_LOG_CHANNEL_NAME
-  );
 
-  if (!channel) return;
+  const channel =
+    getLogChannel(
+      guild,
+      MODERATION_LOG_CHANNEL_NAME
+    );
 
-  const actionEmojis = {
-    KICK: "👢",
-    BAN: "🔨",
-    TEMPBAN: "⏳",
-    TIMEOUT: "🔇",
-    WARN: "⚠️",
-    UNBAN: "🔓",
-    CLEARWARNINGS: "🧹"
-  };
+  if (!channel) {
+    return null;
+  }
 
-  const emoji = actionEmojis[action] || "🛡️";
+  const caseNumber =
+    createCase(
+      guild.id,
+      {
+        type,
 
-  const embed = new EmbedBuilder()
-    .setAuthor({
-      name: moderator?.tag || "Modérateur inconnu",
-      iconURL: moderator?.displayAvatarURL?.() || null
-    })
-    .setTitle(`${emoji} ${action}`)
-    .setThumbnail(
-      target?.displayAvatarURL?.({
-        size: 256
-      }) || null
-    )
-    .addFields(
-      {
-        name: "👤 Membre",
-        value: target
-          ? `${target} \`${target.user?.tag || target.tag || "Inconnu"}\``
-          : "Inconnu",
-        inline: false
-      },
-      {
-        name: "🆔 ID",
-        value: target?.id || "Inconnu",
-        inline: true
-      },
-      {
-        name: "👮 Modérateur",
-        value: moderator
-          ? `${moderator}`
-          : "Inconnu",
-        inline: true
-      },
-      {
-        name: "📄 Raison",
-        value: reason || "Aucune raison fournie",
-        inline: false
+        userId:
+          memberUser.id,
+
+        userTag:
+          memberUser.tag,
+
+        moderatorId:
+          moderator?.id ??
+          null,
+
+        moderatorTag:
+          moderator?.tag ??
+          "Inconnu",
+
+        reason,
+
+        duration,
+
+        expiresAt:
+          expires
+            ? new Date(
+                expires
+              ).getTime()
+            : null,
+
+        proof:
+          proof?.url ??
+          null
       }
-    )
-    .setColor(
-      action === "UNBAN"
-        ? 0x57F287
-        : action === "WARN"
-        ? 0xFEE75C
-        : 0xED4245
-    )
-    .setTimestamp();
+    );
+
+  const embed =
+    new EmbedBuilder()
+      .setTitle(title)
+      .setColor(color)
+      .setThumbnail(
+        memberUser.displayAvatarURL({
+          extension: "png",
+          size: 256
+        })
+      )
+
+      .addFields(
+
+        {
+          name:
+            "👤 Membre",
+
+          value:
+            `${memberUser.tag} (\`${memberUser.id}\`)`,
+
+          inline:
+            false
+        },
+
+        {
+          name:
+            "🛡️ Modérateur",
+
+          value:
+            `${moderator?.tag ?? "Inconnu"} (\`${moderator?.id ?? "Inconnu"}\`)`,
+
+          inline:
+            false
+        }
+      );
 
   if (duration) {
+
     embed.addFields({
-      name: "⏱️ Durée",
-      value: formatDuration(duration),
-      inline: true
+      name:
+        "⏱️ Durée",
+
+      value:
+        duration,
+
+      inline:
+        true
     });
   }
 
-  if (expiresAt) {
+  if (expires) {
+
     embed.addFields({
-      name: "⌛ Expiration",
-      value: `<t:${Math.floor(expiresAt / 1000)}:F>\n(<t:${Math.floor(expiresAt / 1000)}:R>)`,
-      inline: true
+      name:
+        "📅 Expire",
+
+      value:
+        formatDiscordDate(
+          expires
+        ),
+
+      inline:
+        true
     });
   }
 
-  if (proof) {
-    embed.addFields({
-      name: "📎 Preuve",
-      value: proof,
-      inline: false
-    });
-  }
+  embed.addFields({
+    name:
+      "📝 Raison",
 
-  if (caseData) {
-    embed.addFields({
-      name: "📁 Case",
-      value: `#${caseData.id}`,
-      inline: true
-    });
-  }
+    value:
+      cleanText(reason),
 
-  embed.setFooter({
-    text: `${guild.name} • ${action}`
+    inline:
+      false
   });
 
-  await channel.send({
-    embeds: [embed]
-  }).catch(() => {});
-}
+  if (proof) {
 
-// ======================================================
-// LOG GÉNÉRAL
-// ======================================================
+    embed.addFields({
+      name:
+        "📎 Preuves",
 
-async function sendLog(guild, title, description, color = 0x5865F2) {
-  const channel = getLogChannel(
-    guild,
-    LOG_CHANNEL_NAME
-  );
+      value:
+        `[Voir la preuve](${proof.url})`,
 
-  if (!channel) return;
+      inline:
+        false
+    });
+  }
 
-  const embed = new EmbedBuilder()
-    .setTitle(title)
-    .setDescription(description)
-    .setColor(color)
+  if (
+    extraFields.length
+  ) {
+
+    embed.addFields(
+      extraFields.map(
+        field => ({
+          ...field,
+
+          value:
+            cleanText(
+              field.value
+            )
+        })
+      )
+    );
+  }
+
+  embed.addFields({
+    name:
+      "📁 Case",
+
+    value:
+      `#${caseNumber}`,
+
+    inline:
+      false
+  });
+
+  embed
+    .setFooter({
+      text:
+        `Case #${caseNumber}`
+    })
+
     .setTimestamp();
 
   await channel.send({
-    embeds: [embed]
+    embeds: [
+      embed
+    ]
   }).catch(() => {});
+
+  return caseNumber;
 }
+
 
 // ======================================================
 // IMAGE DE BIENVENUE
 // ======================================================
 
-async function generateWelcomeImage(member) {
-  const canvas = createCanvas(1200, 500);
-  const ctx = canvas.getContext("2d");
+async function generateWelcomeImage(
+  member
+) {
 
-  // Fond
-  const gradient = ctx.createLinearGradient(
-    0,
-    0,
-    canvas.width,
-    canvas.height
-  );
+  const width = 900;
+  const height = 300;
 
-  gradient.addColorStop(0, "#111827");
-  gradient.addColorStop(1, "#1f2937");
+  const canvas =
+    createCanvas(
+      width,
+      height
+    );
 
-  ctx.fillStyle = gradient;
+  const ctx =
+    canvas.getContext(
+      "2d"
+    );
+
+  ctx.fillStyle =
+    "#23272a";
+
   ctx.fillRect(
     0,
     0,
-    canvas.width,
-    canvas.height
+    width,
+    height
   );
 
-  // Cercle avatar
-  const avatar = await loadImage(
+  ctx.fillStyle =
+    "#5865F2";
+
+  ctx.fillRect(
+    0,
+    0,
+    8,
+    height
+  );
+
+  const avatarSize =
+    200;
+
+  const avatarX =
+    60;
+
+  const avatarY =
+    (
+      height -
+      avatarSize
+    ) / 2;
+
+  const avatarURL =
     member.user.displayAvatarURL({
       extension: "png",
       size: 256
-    })
-  );
+    });
+
+  const avatarImage =
+    await loadImage(
+      avatarURL
+    );
 
   ctx.save();
 
   ctx.beginPath();
+
   ctx.arc(
-    600,
-    190,
-    100,
+    avatarX +
+      avatarSize / 2,
+
+    avatarY +
+      avatarSize / 2,
+
+    avatarSize / 2,
+
     0,
     Math.PI * 2
   );
@@ -454,1790 +946,4092 @@ async function generateWelcomeImage(member) {
   ctx.clip();
 
   ctx.drawImage(
-    avatar,
-    500,
-    90,
-    200,
-    200
+    avatarImage,
+    avatarX,
+    avatarY,
+    avatarSize,
+    avatarSize
   );
 
   ctx.restore();
 
-  // Texte bienvenue
-  ctx.textAlign = "center";
+  const textX =
+    avatarX +
+    avatarSize +
+    50;
 
-  ctx.font = "bold 54px Sans";
-  ctx.fillStyle = "#ffffff";
+  ctx.textBaseline =
+    "top";
+
+  ctx.fillStyle =
+    "#ffffff";
+
+  ctx.font =
+    "bold 60px sans-serif";
 
   ctx.fillText(
-    "BIENVENUE !",
-    600,
-    350
+    "Bienvenue",
+    textX,
+    70
   );
 
-  ctx.font = "bold 36px Sans";
+  ctx.font =
+    "28px sans-serif";
+
+  ctx.fillStyle =
+    "#b9bbbe";
+
+  ctx.fillText(
+    "sur le serveur Discord",
+    textX,
+    150
+  );
+
+  ctx.font =
+    "bold 34px sans-serif";
+
+  ctx.fillStyle =
+    "#ffffff";
 
   ctx.fillText(
     member.user.username,
-    600,
-    405
+    textX,
+    195
   );
 
-  ctx.font = "26px Sans";
-
-  ctx.fillStyle = "#cbd5e1";
-
-  ctx.fillText(
-    `Tu es le membre #${member.guild.memberCount}`,
-    600,
-    450
+  return canvas.toBuffer(
+    "image/png"
   );
-
-  return canvas.toBuffer("image/png");
 }
+
+
+// ======================================================
+// TRANSCRIPT
+// ======================================================
+
+async function generateTranscript(
+  channel
+) {
+
+  let allMessages = [];
+
+  let lastId = null;
+
+  while (true) {
+
+    const options = {
+      limit: 100
+    };
+
+    if (lastId) {
+      options.before =
+        lastId;
+    }
+
+    const fetched =
+      await channel.messages.fetch(
+        options
+      );
+
+    if (
+      fetched.size === 0
+    ) {
+      break;
+    }
+
+    allMessages.push(
+      ...fetched.values()
+    );
+
+    lastId =
+      fetched.last().id;
+
+    if (
+      fetched.size < 100
+    ) {
+      break;
+    }
+  }
+
+  allMessages.reverse();
+
+  const lines =
+    allMessages.map(
+      msg => {
+
+        const time =
+          msg.createdAt.toLocaleString(
+            "fr-FR",
+            {
+              dateStyle:
+                "short",
+
+              timeStyle:
+                "short"
+            }
+          );
+
+        let content =
+          msg.content || "";
+
+        for (
+          const [
+            id,
+            user
+          ]
+          of msg.mentions.users
+        ) {
+
+          content =
+            content.replace(
+              new RegExp(
+                `<@!?${id}>`,
+                "g"
+              ),
+
+              `@${user.username}`
+            );
+        }
+
+        for (
+          const [
+            id,
+            role
+          ]
+          of msg.mentions.roles
+        ) {
+
+          content =
+            content.replace(
+              new RegExp(
+                `<@&${id}>`,
+                "g"
+              ),
+
+              `@${role.name}`
+            );
+        }
+
+        for (
+          const [
+            id,
+            channelMention
+          ]
+          of msg.mentions.channels
+        ) {
+
+          content =
+            content.replace(
+              new RegExp(
+                `<#${id}>`,
+                "g"
+              ),
+
+              `#${channelMention.name}`
+            );
+        }
+
+        const attachments =
+          [
+            ...msg.attachments.values()
+          ]
+
+            .map(
+              a =>
+                `[Fichier joint : ${a.name} — ${a.url}]`
+            )
+
+            .join("\n");
+
+        let line =
+          `[${time}] ${msg.author.tag} : ${content}`;
+
+        if (attachments) {
+          line +=
+            `\n${attachments}`;
+        }
+
+        return line;
+      }
+    );
+
+  return (
+    `Transcript du ticket : ${channel.name}\n` +
+    `${"=".repeat(50)}\n\n` +
+    (
+      lines.length
+        ? lines.join("\n\n")
+        : "Aucun message dans ce ticket."
+    )
+  );
+}
+
+
+// ======================================================
+// TICKETS
+// ======================================================
+
+const TICKET_CATEGORIES = [
+
+  {
+    value:
+      "administration",
+
+    label:
+      "Administration",
+
+    emoji:
+      "🛡️",
+
+    roles:
+      [
+        "Administrateur"
+      ]
+  },
+
+  {
+    value:
+      "aide_generale",
+
+    label:
+      "Aide générale",
+
+    emoji:
+      "❓",
+
+    roles:
+      [
+        "Administrateur",
+        "Moderateur Discord",
+        "Helper"
+      ]
+  },
+
+  {
+    value:
+      "moderation_discord",
+
+    label:
+      "Modération Discord",
+
+    emoji:
+      "⚔️",
+
+    roles:
+      [
+        "Administrateur",
+        "Gestionnaire.Mods discord",
+        "Moderateur Discord"
+      ]
+  },
+
+  {
+    value:
+      "moderation_twitch",
+
+    label:
+      "Modération Twitch",
+
+    emoji:
+      "🟣",
+
+    roles:
+      [
+        "Administrateur",
+        "Gestionnaire Twitch",
+        "Moderateur Twitch"
+      ]
+  },
+
+  {
+    value:
+      "moderation_youtube",
+
+    label:
+      "Modération YouTube",
+
+    emoji:
+      "🔴",
+
+    roles:
+      [
+        "Administrateur",
+        "Moderateur YouTube"
+      ]
+  },
+
+  {
+    value:
+      "animation",
+
+    label:
+      "Animation",
+
+    emoji:
+      "🎉",
+
+    roles:
+      [
+        "Administrateur",
+        "Moderateur Animation"
+      ]
+  },
+
+  {
+    value:
+      "bug_technique",
+
+    label:
+      "Bug ou problème technique",
+
+    emoji:
+      "🛠️",
+
+    roles:
+      [
+        "Administrateur"
+      ]
+  },
+
+  {
+    value:
+      "candidature",
+
+    label:
+      "Candidature",
+
+    emoji:
+      "📋",
+
+    hasSubcategories:
+      true
+  },
+
+  {
+    value:
+      "abus_staff",
+
+    label:
+      "Signaler un abus d'un Staff",
+
+    emoji:
+      "🚨",
+
+    roles:
+      [
+        "Administrateur"
+      ]
+  },
+
+  {
+    value:
+      "autre",
+
+    label:
+      "Autre demande",
+
+    emoji:
+      "✏️",
+
+    roles:
+      [
+        "Administrateur",
+        "Moderateur Discord",
+        "Helper"
+      ]
+  }
+];
+
+
+const CANDIDATURE_SUBCATEGORIES = [
+
+  {
+    value:
+      "candidature_discord",
+
+    label:
+      "Staff Discord",
+
+    emoji:
+      "⚔️",
+
+    description:
+      "Modération / Staff sur le serveur Discord",
+
+    roles:
+      [
+        "Administrateur",
+        "Gestionnaire.Mods discord"
+      ]
+  },
+
+  {
+    value:
+      "candidature_twitch",
+
+    label:
+      "Twitch",
+
+    emoji:
+      "🟣",
+
+    description:
+      "Modération pendant les lives Twitch",
+
+    roles:
+      [
+        "Administrateur",
+        "Gestionnaire Twitch"
+      ]
+  },
+
+  {
+    value:
+      "candidature_youtube",
+
+    label:
+      "YouTube / TikTok",
+
+    emoji:
+      "🔴",
+
+    description:
+      "Modération YouTube / TikTok",
+
+    roles:
+      [
+        "Administrateur"
+      ]
+  },
+
+  {
+    value:
+      "candidature_animation",
+
+    label:
+      "Animation",
+
+    emoji:
+      "🎭",
+
+    description:
+      "Animateur sur le serveur",
+
+    roles:
+      [
+        "Administrateur",
+        "Gestionnaire.Mods discord"
+      ]
+  }
+];
+
+
+function getRolesForCategory(
+  guild,
+  category
+) {
+
+  return (
+    category.roles || []
+  )
+
+    .map(
+      roleName =>
+        guild.roles.cache.find(
+          r =>
+            r.name ===
+            roleName
+        )
+    )
+
+    .filter(Boolean);
+}
+
+
+// ======================================================
+// PANEL TICKET
+// ======================================================
+
+function buildTicketPanel() {
+
+  const banniere =
+    new AttachmentBuilder(
+      "./zenyxx_banner.png"
+    );
+
+  const embed =
+    new EmbedBuilder()
+
+      .setTitle(
+        "🎫 Support — Ouvrir un ticket"
+      )
+
+      .setDescription(
+        "Sélectionnez le type de demande ci-dessous pour ouvrir un ticket :\n\n" +
+
+        TICKET_CATEGORIES
+          .map(
+            c =>
+              `${c.emoji} — **${c.label}**`
+          )
+          .join("\n")
+      )
+
+      .setImage(
+        "attachment://zenyxx_banner.png"
+      )
+
+      .setColor(
+        0x5865F2
+      );
+
+  const selectMenu =
+    new StringSelectMenuBuilder()
+
+      .setCustomId(
+        "ticket_category_select"
+      )
+
+      .setPlaceholder(
+        "Sélectionnez le type de ticket"
+      )
+
+      .addOptions(
+        TICKET_CATEGORIES.map(
+          c => ({
+            label:
+              c.label,
+
+            value:
+              c.value,
+
+            emoji:
+              c.emoji
+          })
+        )
+      );
+
+  return {
+
+    embeds:
+      [embed],
+
+    components:
+      [
+        new ActionRowBuilder()
+          .addComponents(
+            selectMenu
+          )
+      ],
+
+    files:
+      [banniere]
+  };
+}
+
+
+// ======================================================
+// CRÉATION TICKET
+// ======================================================
+
+async function createTicketChannel(
+  interaction,
+  guild,
+  categoryLike
+) {
+
+  const safeUsername =
+    interaction.user.username
+      .toLowerCase()
+      .replace(
+        /[^a-z0-9-_]/g,
+        "-"
+      )
+      .slice(
+        0,
+        40
+      );
+
+  const existing =
+    guild.channels.cache.find(
+      c =>
+        c.name ===
+        `ticket-${categoryLike.value}-${safeUsername}`
+    );
+
+  if (existing) {
+
+    return interaction.editReply({
+      content:
+        `Tu as déjà un ticket ouvert : ${existing}`
+    });
+  }
+
+  const staffRoles =
+    getRolesForCategory(
+      guild,
+      categoryLike
+    );
+
+  const permissionOverwrites = [
+
+    {
+      id:
+        guild.roles.everyone.id,
+
+      deny:
+        [
+          PermissionFlagsBits.ViewChannel
+        ]
+    },
+
+    {
+      id:
+        interaction.user.id,
+
+      allow:
+        [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory
+        ]
+    },
+
+    ...staffRoles.map(
+      role => ({
+
+        id:
+          role.id,
+
+        allow:
+          [
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.SendMessages,
+            PermissionFlagsBits.ReadMessageHistory
+          ]
+      })
+    )
+  ];
+
+  const ticketChannel =
+    await guild.channels.create({
+
+      name:
+        `ticket-${categoryLike.value}-${safeUsername}`,
+
+      type:
+        ChannelType.GuildText,
+
+      permissionOverwrites
+    })
+      .catch(
+        () => null
+      );
+
+  if (!ticketChannel) {
+
+    return interaction.editReply({
+      content:
+        "❌ Impossible de créer le ticket. Vérifie mes permissions."
+    });
+  }
+
+  const welcomeEmbed =
+    new EmbedBuilder()
+
+      .setTitle(
+        `${categoryLike.emoji} Ticket — ${categoryLike.label}`
+      )
+
+      .setDescription(
+        `Bienvenue ${interaction.user}, ton ticket a été créé.\n\n` +
+        `Merci de décrire ta demande en détail. Un membre du staff va te répondre bientôt.`
+      )
+
+      .setColor(
+        0x5865F2
+      )
+
+      .setTimestamp();
+
+  const closeButton =
+    new ButtonBuilder()
+
+      .setCustomId(
+        "close_ticket"
+      )
+
+      .setLabel(
+        "Fermer le ticket"
+      )
+
+      .setStyle(
+        ButtonStyle.Danger
+      )
+
+      .setEmoji(
+        "🔒"
+      );
+
+  const silentRoles = [
+    "Administrateur",
+    "Gestionnaire.Mods discord"
+  ];
+
+  const pingCandidates =
+    staffRoles.filter(
+      r =>
+        !silentRoles.includes(
+          r.name
+        )
+    );
+
+  const mentionRoles =
+    (
+      pingCandidates.length
+        ? pingCandidates
+        : staffRoles
+    )
+
+      .map(
+        r =>
+          `<@&${r.id}>`
+      )
+
+      .join(" ");
+
+  await ticketChannel.send({
+
+    content:
+      `${interaction.user} ${mentionRoles}`.trim(),
+
+    embeds:
+      [welcomeEmbed],
+
+    components:
+      [
+        new ActionRowBuilder()
+          .addComponents(
+            closeButton
+          )
+      ]
+  });
+
+  await interaction.editReply({
+    content:
+      `✅ Ton ticket a été créé : ${ticketChannel}`
+  });
+
+  await sendLog(
+
+    guild,
+
+    "🎫 Ticket créé",
+
+    null,
+
+    TICKET_LOG_CHANNEL_NAME,
+
+    [
+
+      {
+        name:
+          "👤 Membre",
+
+        value:
+          `${interaction.user.tag} (\`${interaction.user.id}\`)`,
+
+        inline:
+          false
+      },
+
+      {
+        name:
+          "📋 Type",
+
+        value:
+          categoryLike.label,
+
+        inline:
+          true
+      },
+
+      {
+        name:
+          "📍 Salon",
+
+        value:
+          `${ticketChannel}`,
+
+        inline:
+          true
+      }
+    ],
+
+    0x5865F2
+  );
+}
+
+
+// ======================================================
+// TEMPBAN
+// ======================================================
+
+function addTempBan(
+  guildId,
+  userId,
+  expiresAt
+) {
+
+  const data =
+    loadCaseData();
+
+  const guildData =
+    getGuildCaseData(
+      guildId,
+      data
+    );
+
+  guildData.tempbans =
+    guildData.tempbans.filter(
+      x =>
+        x.userId !== userId
+    );
+
+  guildData.tempbans.push({
+    userId,
+    expiresAt
+  });
+
+  saveCaseData(data);
+}
+
+
+function removeTempBan(
+  guildId,
+  userId
+) {
+
+  const data =
+    loadCaseData();
+
+  const guildData =
+    getGuildCaseData(
+      guildId,
+      data
+    );
+
+  guildData.tempbans =
+    guildData.tempbans.filter(
+      x =>
+        x.userId !== userId
+    );
+
+  saveCaseData(data);
+}
+
+
+function scheduleTempBan(
+  guild,
+  userId,
+  expiresAt
+) {
+
+  const delay =
+    Math.max(
+      0,
+      expiresAt -
+      Date.now()
+    );
+
+  // setTimeout ne peut pas gérer plus de ~24,8 jours.
+  if (
+    delay >
+    2147483647
+  ) {
+
+    setTimeout(
+      () => {
+
+        scheduleTempBan(
+          guild,
+          userId,
+          expiresAt
+        );
+
+      },
+
+      2147483647
+    );
+
+    return;
+  }
+
+  setTimeout(
+    async () => {
+
+      try {
+
+        await guild.members.unban(
+          userId,
+          "Fin du bannissement temporaire"
+        );
+
+        removeTempBan(
+          guild.id,
+          userId
+        );
+
+        console.log(
+          `✅ Tempban terminé pour ${userId} sur ${guild.name}`
+        );
+
+      } catch {
+
+        removeTempBan(
+          guild.id,
+          userId
+        );
+      }
+
+    },
+
+    delay
+  );
+}
+
+
+async function restoreTempBans() {
+
+  const data =
+    loadCaseData();
+
+  for (
+    const [
+      guildId,
+      guildData
+    ]
+    of Object.entries(data)
+  ) {
+
+    const guild =
+      client.guilds.cache.get(
+        guildId
+      );
+
+    if (!guild) {
+      continue;
+    }
+
+    const tempbans =
+      guildData.tempbans ||
+      [];
+
+    for (
+      const tempban
+      of tempbans
+    ) {
+
+      if (
+        tempban.expiresAt <=
+        Date.now()
+      ) {
+
+        await guild.members.unban(
+          tempban.userId,
+          "Fin du bannissement temporaire"
+        ).catch(
+          () => {}
+        );
+
+        removeTempBan(
+          guildId,
+          tempban.userId
+        );
+
+      } else {
+
+        scheduleTempBan(
+          guild,
+          tempban.userId,
+          tempban.expiresAt
+        );
+      }
+    }
+  }
+}
+
 
 // ======================================================
 // COMMANDES
 // ======================================================
 
 const commands = [
+
+  // KICK
   new SlashCommandBuilder()
-    .setName("kick")
-    .setDescription("Expulse un membre")
-    .addUserOption(option =>
-      option
-        .setName("membre")
-        .setDescription("Membre à expulser")
-        .setRequired(true)
+
+    .setName(
+      "kick"
     )
-    .addStringOption(option =>
-      option
-        .setName("raison")
-        .setDescription("Raison de l'expulsion")
-        .setRequired(false)
+
+    .setDescription(
+      "Expulse un membre du serveur"
     )
+
+    .addUserOption(
+      o =>
+        o
+          .setName(
+            "membre"
+          )
+          .setDescription(
+            "Le membre à expulser"
+          )
+          .setRequired(
+            true
+          )
+    )
+
+    .addStringOption(
+      o =>
+        o
+          .setName(
+            "raison"
+          )
+          .setDescription(
+            "Raison de l'expulsion"
+          )
+          .setRequired(
+            false
+          )
+    )
+
+    .addAttachmentOption(
+      o =>
+        o
+          .setName(
+            "preuve"
+          )
+          .setDescription(
+            "Preuve de la sanction"
+          )
+          .setRequired(
+            false
+          )
+    )
+
     .setDefaultMemberPermissions(
       PermissionFlagsBits.KickMembers
     ),
 
+
+  // BAN
   new SlashCommandBuilder()
-    .setName("ban")
-    .setDescription("Bannit définitivement un membre")
-    .addUserOption(option =>
-      option
-        .setName("membre")
-        .setDescription("Membre à bannir")
-        .setRequired(true)
+
+    .setName(
+      "ban"
     )
-    .addStringOption(option =>
-      option
-        .setName("raison")
-        .setDescription("Raison du bannissement")
-        .setRequired(false)
+
+    .setDescription(
+      "Bannit définitivement un membre"
     )
-    .addStringOption(option =>
-      option
-        .setName("preuve")
-        .setDescription("Lien ou preuve")
-        .setRequired(false)
+
+    .addUserOption(
+      o =>
+        o
+          .setName(
+            "membre"
+          )
+          .setDescription(
+            "Le membre à bannir"
+          )
+          .setRequired(
+            true
+          )
     )
+
+    .addStringOption(
+      o =>
+        o
+          .setName(
+            "raison"
+          )
+          .setDescription(
+            "Raison du bannissement"
+          )
+          .setRequired(
+            false
+          )
+    )
+
+    .addAttachmentOption(
+      o =>
+        o
+          .setName(
+            "preuve"
+          )
+          .setDescription(
+            "Preuve du bannissement"
+          )
+          .setRequired(
+            false
+          )
+    )
+
     .setDefaultMemberPermissions(
       PermissionFlagsBits.BanMembers
     ),
 
+
+  // TEMPBAN
   new SlashCommandBuilder()
-    .setName("tempban")
-    .setDescription("Bannit temporairement un membre")
-    .addUserOption(option =>
-      option
-        .setName("membre")
-        .setDescription("Membre à bannir")
-        .setRequired(true)
+
+    .setName(
+      "tempban"
     )
-    .addStringOption(option =>
-      option
-        .setName("durée")
-        .setDescription("Exemple : 1d, 4d, 7d, 2h")
-        .setRequired(true)
+
+    .setDescription(
+      "Bannit temporairement un membre"
     )
-    .addStringOption(option =>
-      option
-        .setName("raison")
-        .setDescription("Raison")
-        .setRequired(false)
+
+    .addUserOption(
+      o =>
+        o
+          .setName(
+            "membre"
+          )
+          .setDescription(
+            "Le membre à bannir"
+          )
+          .setRequired(
+            true
+          )
     )
-    .addStringOption(option =>
-      option
-        .setName("preuve")
-        .setDescription("Lien ou preuve")
-        .setRequired(false)
+
+    .addStringOption(
+      o =>
+        o
+          .setName(
+            "duree"
+          )
+          .setDescription(
+            "Exemples : 1d, 4d, 7d, 14d, 28d"
+          )
+          .setRequired(
+            true
+          )
     )
+
+    .addStringOption(
+      o =>
+        o
+          .setName(
+            "raison"
+          )
+          .setDescription(
+            "Raison du bannissement"
+          )
+          .setRequired(
+            false
+          )
+    )
+
+    .addAttachmentOption(
+      o =>
+        o
+          .setName(
+            "preuve"
+          )
+          .setDescription(
+            "Preuve du bannissement"
+          )
+          .setRequired(
+            false
+          )
+    )
+
     .setDefaultMemberPermissions(
       PermissionFlagsBits.BanMembers
     ),
 
+
+  // TIMEOUT
   new SlashCommandBuilder()
-    .setName("timeout")
-    .setDescription("Met un membre en timeout")
-    .addUserOption(option =>
-      option
-        .setName("membre")
-        .setDescription("Membre")
-        .setRequired(true)
+
+    .setName(
+      "timeout"
     )
-    .addStringOption(option =>
-      option
-        .setName("durée")
-        .setDescription("Exemple : 10m, 1h, 1d")
-        .setRequired(true)
+
+    .setDescription(
+      "Exclut temporairement un membre"
     )
-    .addStringOption(option =>
-      option
-        .setName("raison")
-        .setDescription("Raison")
-        .setRequired(false)
+
+    .addUserOption(
+      o =>
+        o
+          .setName(
+            "membre"
+          )
+          .setDescription(
+            "Le membre à exclure"
+          )
+          .setRequired(
+            true
+          )
     )
-    .addStringOption(option =>
-      option
-        .setName("preuve")
-        .setDescription("Lien ou preuve")
-        .setRequired(false)
+
+    .addStringOption(
+      o =>
+        o
+          .setName(
+            "duree"
+          )
+          .setDescription(
+            "Exemples : 5m, 1h, 1d, 4d, 28d"
+          )
+          .setRequired(
+            true
+          )
     )
+
+    .addStringOption(
+      o =>
+        o
+          .setName(
+            "raison"
+          )
+          .setDescription(
+            "Raison du timeout"
+          )
+          .setRequired(
+            false
+          )
+    )
+
+    .addAttachmentOption(
+      o =>
+        o
+          .setName(
+            "preuve"
+          )
+          .setDescription(
+            "Preuve du timeout"
+          )
+          .setRequired(
+            false
+          )
+    )
+
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ModerateMembers
     ),
 
+
+  // WARN
   new SlashCommandBuilder()
-    .setName("warn")
-    .setDescription("Avertit un membre")
-    .addUserOption(option =>
-      option
-        .setName("membre")
-        .setDescription("Membre")
-        .setRequired(true)
+
+    .setName(
+      "warn"
     )
-    .addStringOption(option =>
-      option
-        .setName("raison")
-        .setDescription("Raison de l'avertissement")
-        .setRequired(true)
+
+    .setDescription(
+      "Avertit un membre"
     )
-    .addStringOption(option =>
-      option
-        .setName("preuve")
-        .setDescription("Lien ou preuve")
-        .setRequired(false)
+
+    .addUserOption(
+      o =>
+        o
+          .setName(
+            "membre"
+          )
+          .setDescription(
+            "Le membre à avertir"
+          )
+          .setRequired(
+            true
+          )
     )
+
+    .addStringOption(
+      o =>
+        o
+          .setName(
+            "raison"
+          )
+          .setDescription(
+            "Raison de l'avertissement"
+          )
+          .setRequired(
+            false
+          )
+    )
+
+    .addAttachmentOption(
+      o =>
+        o
+          .setName(
+            "preuve"
+          )
+          .setDescription(
+            "Preuve de l'avertissement"
+          )
+          .setRequired(
+            false
+          )
+    )
+
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ModerateMembers
     ),
 
+
+  // WARNINGS
   new SlashCommandBuilder()
-    .setName("warnings")
-    .setDescription("Affiche les avertissements d'un membre")
-    .addUserOption(option =>
-      option
-        .setName("membre")
-        .setDescription("Membre")
-        .setRequired(true)
+
+    .setName(
+      "warnings"
     )
+
+    .setDescription(
+      "Affiche les avertissements d'un membre"
+    )
+
+    .addUserOption(
+      o =>
+        o
+          .setName(
+            "membre"
+          )
+          .setDescription(
+            "Le membre"
+          )
+          .setRequired(
+            true
+          )
+    )
+
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ModerateMembers
     ),
 
+
+  // CLEAR WARNINGS
   new SlashCommandBuilder()
-    .setName("clearwarnings")
-    .setDescription("Supprime les avertissements d'un membre")
-    .addUserOption(option =>
-      option
-        .setName("membre")
-        .setDescription("Membre")
-        .setRequired(true)
+
+    .setName(
+      "clearwarnings"
     )
+
+    .setDescription(
+      "Supprime les avertissements d'un membre"
+    )
+
+    .addUserOption(
+      o =>
+        o
+          .setName(
+            "membre"
+          )
+          .setDescription(
+            "Le membre"
+          )
+          .setRequired(
+            true
+          )
+    )
+
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ModerateMembers
     ),
 
+
+  // UNBAN
   new SlashCommandBuilder()
-    .setName("unban")
-    .setDescription("Débannit un utilisateur")
-    .addStringOption(option =>
-      option
-        .setName("id")
-        .setDescription("ID Discord de l'utilisateur")
-        .setRequired(true)
+
+    .setName(
+      "unban"
     )
-    .addStringOption(option =>
-      option
-        .setName("raison")
-        .setDescription("Raison")
-        .setRequired(false)
+
+    .setDescription(
+      "Débannit un membre"
     )
+
+    .addStringOption(
+      o =>
+        o
+          .setName(
+            "membre"
+          )
+          .setDescription(
+            "ID du membre à débannir"
+          )
+          .setRequired(
+            true
+          )
+    )
+
+    .addStringOption(
+      o =>
+        o
+          .setName(
+            "raison"
+          )
+          .setDescription(
+            "Raison du débannissement"
+          )
+          .setRequired(
+            false
+          )
+    )
+
     .setDefaultMemberPermissions(
       PermissionFlagsBits.BanMembers
     ),
 
+
+  // CASE
   new SlashCommandBuilder()
-    .setName("case")
-    .setDescription("Affiche les informations d'un case")
-    .addIntegerOption(option =>
-      option
-        .setName("numero")
-        .setDescription("Numéro du case")
-        .setRequired(true)
+
+    .setName(
+      "case"
     )
+
+    .setDescription(
+      "Affiche les informations d'une case"
+    )
+
+    .addIntegerOption(
+      o =>
+        o
+          .setName(
+            "numero"
+          )
+          .setDescription(
+            "Numéro de la case"
+          )
+          .setRequired(
+            true
+          )
+    )
+
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ModerateMembers
     ),
 
+
+  // CLEAR
   new SlashCommandBuilder()
-    .setName("clear")
-    .setDescription("Supprime des messages")
-    .addIntegerOption(option =>
-      option
-        .setName("nombre")
-        .setDescription("Nombre de messages")
-        .setRequired(true)
-        .setMinValue(1)
-        .setMaxValue(100)
+
+    .setName(
+      "clear"
     )
+
+    .setDescription(
+      "Supprime un nombre de messages"
+    )
+
+    .addIntegerOption(
+      o =>
+        o
+          .setName(
+            "nombre"
+          )
+          .setDescription(
+            "Nombre de messages à supprimer (1-100)"
+          )
+          .setRequired(
+            true
+          )
+          .setMinValue(
+            1
+          )
+          .setMaxValue(
+            100
+          )
+    )
+
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageMessages
     ),
 
+
+  // TICKET PANEL
   new SlashCommandBuilder()
-    .setName("ticket-panel")
-    .setDescription("Envoie le panneau de création de ticket")
-    .setDefaultMemberPermissions(
-      PermissionFlagsBits.ManageChannels
+
+    .setName(
+      "ticket-panel"
     )
-].map(command => command.toJSON());
+
+    .setDescription(
+      "Affiche le panneau de création de tickets"
+    )
+
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.Administrator
+    )
+
+].map(
+  command =>
+    command.toJSON()
+);
+
 
 // ======================================================
 // READY
 // ======================================================
 
-client.once("ready", async () => {
-  console.log(`Connecté en tant que ${client.user.tag}`);
+client.once(
+  "ready",
+  async () => {
 
-  try {
-    await client.application.commands.set(commands);
-
-    console.log("Commandes slash enregistrées.");
-  } catch (error) {
-    console.error(
-      "Erreur enregistrement commandes :",
-      error
+    console.log(
+      `✅ ${client.user.tag} est connecté !`
     );
-  }
 
-  restoreTempBans();
-});
+    try {
 
-// ======================================================
-// RESTAURATION DES TEMPBAN
-// ======================================================
-
-function restoreTempBans() {
-  for (const guild of client.guilds.cache.values()) {
-    if (!guildData.has(guild.id)) {
-      guildData.set(guild.id, {
-        tempbans: new Map()
-      });
-    }
-
-    const data = guildData.get(guild.id);
-
-    if (!data.tempbans) {
-      data.tempbans = new Map();
-    }
-
-    for (const caseData of casesData.cases) {
-      if (
-        caseData.guildId !== guild.id ||
-        caseData.action !== "TEMPBAN" ||
-        !caseData.expiresAt
+      for (
+        const guild
+        of client.guilds.cache.values()
       ) {
-        continue;
-      }
 
-      const remaining =
-        caseData.expiresAt - Date.now();
-
-      if (remaining <= 0) {
-        unbanUserAutomatically(
-          guild,
-          caseData.userId,
-          caseData.id
-        );
-      } else {
-        scheduleTempBanExpiration(
-          guild,
-          caseData.userId,
-          caseData.expiresAt,
-          caseData.id
+        await guild.commands.set(
+          commands
         );
       }
+
+      console.log(
+        "✅ Commandes slash enregistrées !"
+      );
+
+      await restoreTempBans();
+
+    } catch (error) {
+
+      console.error(
+        "Erreur lors de l'initialisation :",
+        error
+      );
     }
   }
-}
+);
 
-function scheduleTempBanExpiration(
-  guild,
-  userId,
-  expiresAt,
-  caseId
-) {
-  const remaining =
-    expiresAt - Date.now();
-
-  if (remaining <= 0) {
-    unbanUserAutomatically(
-      guild,
-      userId,
-      caseId
-    );
-
-    return;
-  }
-
-  setTimeout(() => {
-    unbanUserAutomatically(
-      guild,
-      userId,
-      caseId
-    );
-  }, Math.min(remaining, 2147483647));
-}
-
-async function unbanUserAutomatically(
-  guild,
-  userId,
-  caseId
-) {
-  try {
-    await guild.members.unban(
-      userId,
-      `Fin du bannissement temporaire — Case #${caseId}`
-    );
-
-    const channel = getLogChannel(
-      guild,
-      MOD_LOG_CHANNEL_NAME
-    );
-
-    if (channel) {
-      const embed = new EmbedBuilder()
-        .setTitle("🔓 Fin du bannissement temporaire")
-        .setDescription(
-          `Le bannissement temporaire de <@${userId}> est terminé.`
-        )
-        .addFields({
-          name: "📁 Case",
-          value: `#${caseId}`
-        })
-        .setColor(0x57F287)
-        .setTimestamp();
-
-      channel.send({
-        embeds: [embed]
-      }).catch(() => {});
-    }
-  } catch (error) {
-    console.error(
-      `Erreur unban automatique ${userId} :`,
-      error.message
-    );
-  }
-}
 
 // ======================================================
 // INTERACTIONS
 // ======================================================
 
-client.on("interactionCreate", async interaction => {
-  if (
-    !interaction.isChatInputCommand() &&
-    !interaction.isStringSelectMenu() &&
-    !interaction.isButton()
-  ) {
-    return;
-  }
-
-  // ====================================================
-  // COMMANDES SLASH
-  // ====================================================
-
-  if (interaction.isChatInputCommand()) {
-    const { commandName } = interaction;
-
-    // --------------------------------------------------
-    // KICK
-    // --------------------------------------------------
-
-    if (commandName === "kick") {
-      const member =
-        interaction.options.getMember("membre");
-
-      const reason =
-        interaction.options.getString("raison") ||
-        "Aucune raison fournie";
-
-      if (!member) {
-        return interaction.reply({
-          content: "❌ Membre introuvable.",
-          ephemeral: true
-        });
-      }
-
-      if (!member.kickable) {
-        return interaction.reply({
-          content:
-            "❌ Je ne peux pas expulser ce membre.",
-          ephemeral: true
-        });
-      }
-
-      const caseData = createCase({
-        guild: interaction.guild,
-        user: member.user,
-        moderator: interaction.user,
-        action: "KICK",
-        reason
-      });
-
-      await member.kick(reason);
-
-      await sendModerationLog({
-        guild: interaction.guild,
-        action: "KICK",
-        target: member,
-        moderator: interaction.user,
-        reason,
-        caseData
-      });
-
-      return interaction.reply({
-        content:
-          `👢 **${member.user.tag}** a été expulsé.\n📁 Case **#${caseData.id}**`,
-        ephemeral: true
-      });
-    }
-
-    // --------------------------------------------------
-    // BAN
-    // --------------------------------------------------
-
-    if (commandName === "ban") {
-      const member =
-        interaction.options.getMember("membre");
-
-      const reason =
-        interaction.options.getString("raison") ||
-        "Aucune raison fournie";
-
-      const proof =
-        interaction.options.getString("preuve");
-
-      if (!member) {
-        return interaction.reply({
-          content: "❌ Membre introuvable.",
-          ephemeral: true
-        });
-      }
-
-      if (!member.bannable) {
-        return interaction.reply({
-          content:
-            "❌ Je ne peux pas bannir ce membre.",
-          ephemeral: true
-        });
-      }
-
-      const caseData = createCase({
-        guild: interaction.guild,
-        user: member.user,
-        moderator: interaction.user,
-        action: "BAN",
-        reason,
-        proof
-      });
-
-      await member.ban({
-        reason
-      });
-
-      await sendModerationLog({
-        guild: interaction.guild,
-        action: "BAN",
-        target: member,
-        moderator: interaction.user,
-        reason,
-        proof,
-        caseData
-      });
-
-      return interaction.reply({
-        content:
-          `🔨 **${member.user.tag}** a été banni.\n📁 Case **#${caseData.id}**`,
-        ephemeral: true
-      });
-    }
-
-    // --------------------------------------------------
-    // TEMPBAN
-    // --------------------------------------------------
-
-    if (commandName === "tempban") {
-      const member =
-        interaction.options.getMember("membre");
-
-      const durationInput =
-        interaction.options.getString("durée");
-
-      const duration =
-        parseDuration(durationInput);
-
-      const reason =
-        interaction.options.getString("raison") ||
-        "Aucune raison fournie";
-
-      const proof =
-        interaction.options.getString("preuve");
-
-      if (!member) {
-        return interaction.reply({
-          content: "❌ Membre introuvable.",
-          ephemeral: true
-        });
-      }
-
-      if (!duration) {
-        return interaction.reply({
-          content:
-            "❌ Durée invalide. Exemple : `10m`, `2h`, `4d`, `1w`.",
-          ephemeral: true
-        });
-      }
-
-      if (!member.bannable) {
-        return interaction.reply({
-          content:
-            "❌ Je ne peux pas bannir ce membre.",
-          ephemeral: true
-        });
-      }
-
-      const expiresAt =
-        Date.now() + duration;
-
-      const caseData = createCase({
-        guild: interaction.guild,
-        user: member.user,
-        moderator: interaction.user,
-        action: "TEMPBAN",
-        reason,
-        duration,
-        expiresAt,
-        proof
-      });
-
-      await member.ban({
-        reason: `Tempban ${formatDuration(duration)} — ${reason}`
-      });
-
-      scheduleTempBanExpiration(
-        interaction.guild,
-        member.id,
-        expiresAt,
-        caseData.id
-      );
-
-      await sendModerationLog({
-        guild: interaction.guild,
-        action: "TEMPBAN",
-        target: member,
-        moderator: interaction.user,
-        reason,
-        duration,
-        expiresAt,
-        proof,
-        caseData
-      });
-
-      return interaction.reply({
-        content:
-          `⏳ **${member.user.tag}** a été banni pendant **${formatDuration(duration)}**.\n📁 Case **#${caseData.id}**`,
-        ephemeral: true
-      });
-    }
-
-    // --------------------------------------------------
-    // TIMEOUT
-    // --------------------------------------------------
-
-    if (commandName === "timeout") {
-      const member =
-        interaction.options.getMember("membre");
-
-      const durationInput =
-        interaction.options.getString("durée");
-
-      const duration =
-        parseDuration(durationInput);
-
-      const reason =
-        interaction.options.getString("raison") ||
-        "Aucune raison fournie";
-
-      const proof =
-        interaction.options.getString("preuve");
-
-      if (!member) {
-        return interaction.reply({
-          content: "❌ Membre introuvable.",
-          ephemeral: true
-        });
-      }
-
-      if (!duration) {
-        return interaction.reply({
-          content:
-            "❌ Durée invalide. Exemple : `10m`, `1h`, `1d`.",
-          ephemeral: true
-        });
-      }
-
-      const maxTimeout =
-        28 * 24 * 60 * 60 * 1000;
-
-      if (duration > maxTimeout) {
-        return interaction.reply({
-          content:
-            "❌ Un timeout ne peut pas dépasser 28 jours.",
-          ephemeral: true
-        });
-      }
-
-      if (!member.moderatable) {
-        return interaction.reply({
-          content:
-            "❌ Je ne peux pas mettre ce membre en timeout.",
-          ephemeral: true
-        });
-      }
-
-      const expiresAt =
-        Date.now() + duration;
-
-      const caseData = createCase({
-        guild: interaction.guild,
-        user: member.user,
-        moderator: interaction.user,
-        action: "TIMEOUT",
-        reason,
-        duration,
-        expiresAt,
-        proof
-      });
-
-      await member.timeout(
-        duration,
-        reason
-      );
-
-      await sendModerationLog({
-        guild: interaction.guild,
-        action: "TIMEOUT",
-        target: member,
-        moderator: interaction.user,
-        reason,
-        duration,
-        expiresAt,
-        proof,
-        caseData
-      });
-
-      return interaction.reply({
-        content:
-          `🔇 **${member.user.tag}** est en timeout pendant **${formatDuration(duration)}**.\n📁 Case **#${caseData.id}**`,
-        ephemeral: true
-      });
-    }
-
-    // --------------------------------------------------
-    // WARN
-    // --------------------------------------------------
-
-    if (commandName === "warn") {
-      const member =
-        interaction.options.getMember("membre");
-
-      const reason =
-        interaction.options.getString("raison");
-
-      const proof =
-        interaction.options.getString("preuve");
-
-      if (!member) {
-        return interaction.reply({
-          content: "❌ Membre introuvable.",
-          ephemeral: true
-        });
-      }
-
-      const caseData = createCase({
-        guild: interaction.guild,
-        user: member.user,
-        moderator: interaction.user,
-        action: "WARN",
-        reason,
-        proof
-      });
-
-      await sendModerationLog({
-        guild: interaction.guild,
-        action: "WARN",
-        target: member,
-        moderator: interaction.user,
-        reason,
-        proof,
-        caseData
-      });
-
-      return interaction.reply({
-        content:
-          `⚠️ **${member.user.tag}** a reçu un avertissement.\n📁 Case **#${caseData.id}**`,
-        ephemeral: true
-      });
-    }
-
-    // --------------------------------------------------
-    // WARNINGS
-    // --------------------------------------------------
-
-    if (commandName === "warnings") {
-      const member =
-        interaction.options.getMember("membre");
-
-      if (!member) {
-        return interaction.reply({
-          content: "❌ Membre introuvable.",
-          ephemeral: true
-        });
-      }
-
-      const warnings =
-        casesData.cases.filter(
-          c =>
-            c.guildId === interaction.guild.id &&
-            c.userId === member.id &&
-            c.action === "WARN"
-        );
-
-      if (!warnings.length) {
-        return interaction.reply({
-          content:
-            `✅ **${member.user.tag}** n'a aucun avertissement.`,
-          ephemeral: true
-        });
-      }
-
-      const list = warnings
-        .slice(-10)
-        .reverse()
-        .map(
-          c =>
-            `**Case #${c.id}** — ${c.reason}\n` +
-            `👮 ${c.moderatorTag} • <t:${Math.floor(c.createdAt / 1000)}:R>`
-        )
-        .join("\n\n");
-
-      const embed = new EmbedBuilder()
-        .setTitle(`⚠️ Avertissements de ${member.user.tag}`)
-        .setDescription(list)
-        .setColor(0xFEE75C)
-        .setTimestamp();
-
-      return interaction.reply({
-        embeds: [embed],
-        ephemeral: true
-      });
-    }
-
-    // --------------------------------------------------
-    // CLEAR WARNINGS
-    // --------------------------------------------------
-
-    if (commandName === "clearwarnings") {
-      const member =
-        interaction.options.getMember("membre");
-
-      if (!member) {
-        return interaction.reply({
-          content: "❌ Membre introuvable.",
-          ephemeral: true
-        });
-      }
-
-      const before =
-        casesData.cases.length;
-
-      casesData.cases =
-        casesData.cases.filter(
-          c =>
-            !(
-              c.guildId === interaction.guild.id &&
-              c.userId === member.id &&
-              c.action === "WARN"
-            )
-        );
-
-      saveCases();
-
-      const removed =
-        before - casesData.cases.length;
-
-      const caseData = createCase({
-        guild: interaction.guild,
-        user: member.user,
-        moderator: interaction.user,
-        action: "CLEARWARNINGS",
-        reason: `${removed} avertissement(s) supprimé(s)`
-      });
-
-      await sendModerationLog({
-        guild: interaction.guild,
-        action: "CLEARWARNINGS",
-        target: member,
-        moderator: interaction.user,
-        reason: `${removed} avertissement(s) supprimé(s)`,
-        caseData
-      });
-
-      return interaction.reply({
-        content:
-          `🧹 **${removed}** avertissement(s) supprimé(s) pour **${member.user.tag}**.`,
-        ephemeral: true
-      });
-    }
-
-    // --------------------------------------------------
-    // UNBAN
-    // --------------------------------------------------
-
-    if (commandName === "unban") {
-      const userId =
-        interaction.options.getString("id");
-
-      const reason =
-        interaction.options.getString("raison") ||
-        "Aucune raison fournie";
-
-      let user;
-
-      try {
-        user = await client.users.fetch(userId);
-      } catch {
-        return interaction.reply({
-          content:
-            "❌ Utilisateur introuvable.",
-          ephemeral: true
-        });
-      }
-
-      try {
-        await interaction.guild.members.unban(
-          userId,
-          reason
-        );
-      } catch (error) {
-        return interaction.reply({
-          content:
-            "❌ Impossible de débannir cet utilisateur.",
-          ephemeral: true
-        });
-      }
-
-      const caseData = createCase({
-        guild: interaction.guild,
-        user,
-        moderator: interaction.user,
-        action: "UNBAN",
-        reason
-      });
-
-      await sendModerationLog({
-        guild: interaction.guild,
-        action: "UNBAN",
-        target: user,
-        moderator: interaction.user,
-        reason,
-        caseData
-      });
-
-      return interaction.reply({
-        content:
-          `🔓 **${user.tag}** a été débanni.\n📁 Case **#${caseData.id}**`,
-        ephemeral: true
-      });
-    }
-
-    // --------------------------------------------------
-    // CASE
-    // --------------------------------------------------
-
-    if (commandName === "case") {
-      const caseId =
-        interaction.options.getInteger("numero");
-
-      const caseData =
-        getCase(
-          caseId,
-          interaction.guild.id
-        );
-
-      if (!caseData) {
-        return interaction.reply({
-          content:
-            `❌ Le case **#${caseId}** n'existe pas.`,
-          ephemeral: true
-        });
-      }
-
-      const embed = new EmbedBuilder()
-        .setTitle(`📁 Case #${caseData.id}`)
-        .addFields(
-          {
-            name: "👤 Utilisateur",
-            value:
-              `<@${caseData.userId}>\n\`${caseData.userTag}\``
-          },
-          {
-            name: "🆔 ID",
-            value: caseData.userId,
-            inline: true
-          },
-          {
-            name: "🛡️ Action",
-            value: caseData.action,
-            inline: true
-          },
-          {
-            name: "👮 Modérateur",
-            value:
-              caseData.moderatorTag,
-            inline: true
-          },
-          {
-            name: "📄 Raison",
-            value:
-              caseData.reason ||
-              "Aucune raison"
-          }
-        )
-        .setColor(0x5865F2)
-        .setTimestamp(caseData.createdAt);
-
-      if (caseData.duration) {
-        embed.addFields({
-          name: "⏱️ Durée",
-          value:
-            formatDuration(
-              caseData.duration
-            ),
-          inline: true
-        });
-      }
-
-      if (caseData.expiresAt) {
-        embed.addFields({
-          name: "⌛ Expiration",
-          value:
-            `<t:${Math.floor(caseData.expiresAt / 1000)}:F>`,
-          inline: true
-        });
-      }
-
-      if (caseData.proof) {
-        embed.addFields({
-          name: "📎 Preuve",
-          value: caseData.proof
-        });
-      }
-
-      return interaction.reply({
-        embeds: [embed],
-        ephemeral: true
-      });
-    }
-
-    // --------------------------------------------------
-    // CLEAR
-    // --------------------------------------------------
-
-    if (commandName === "clear") {
-      const amount =
-        interaction.options.getInteger("nombre");
-
-      try {
-        const deleted =
-          await interaction.channel.bulkDelete(
-            amount,
-            true
-          );
-
-        await interaction.reply({
-          content:
-            `🧹 **${deleted.size}** message(s) supprimé(s).`,
-          ephemeral: true
-        });
-
-        await sendLog(
-          interaction.guild,
-          "🧹 Messages supprimés",
-          `${interaction.user} a supprimé **${deleted.size}** message(s) dans ${interaction.channel}.`,
-          0x5865F2
-        );
-      } catch (error) {
-        await interaction.reply({
-          content:
-            "❌ Impossible de supprimer les messages.",
-          ephemeral: true
-        });
-      }
-
+client.on(
+  "interactionCreate",
+  async interaction => {
+
+    const {
+      guild,
+      member
+    } = interaction;
+
+    if (!guild) {
       return;
     }
 
-    // --------------------------------------------------
-    // TICKET PANEL
-    // --------------------------------------------------
 
-    if (commandName === "ticket-panel") {
-      const menu =
-        new StringSelectMenuBuilder()
-          .setCustomId("ticket_category")
-          .setPlaceholder("Sélectionne la catégorie de ton ticket")
-          .addOptions(
-            Object.entries(ticketCategories).map(
-              ([value, data]) => ({
-                label: data.label,
-                description: data.description,
-                value,
-                emoji: data.emoji
-              })
+    // ==================================================
+    // COMMANDES SLASH
+    // ==================================================
+
+    if (
+      interaction.isChatInputCommand()
+    ) {
+
+      const {
+        commandName,
+        options
+      } = interaction;
+
+
+      // ================================================
+      // KICK
+      // ================================================
+
+      if (
+        commandName ===
+        "kick"
+      ) {
+
+        const target =
+          options.getUser(
+            "membre"
+          );
+
+        const reason =
+          options.getString(
+            "raison"
+          ) ||
+          "Aucune raison fournie";
+
+        const proof =
+          options.getAttachment(
+            "preuve"
+          );
+
+        const targetMember =
+          await guild.members
+            .fetch(
+              target.id
             )
+            .catch(
+              () => null
+            );
+
+        if (!targetMember) {
+
+          return interaction.reply({
+            content:
+              "❌ Membre introuvable.",
+
+            ephemeral:
+              true
+          });
+        }
+
+        if (
+          !targetMember.kickable
+        ) {
+
+          return interaction.reply({
+            content:
+              "❌ Je ne peux pas expulser ce membre.",
+
+            ephemeral:
+              true
+          });
+        }
+
+        markBotAction(
+          guild.id,
+          target.id,
+          "kick"
+        );
+
+        await targetMember.kick(
+          reason
+        );
+
+        await interaction.reply(
+          `👢 **${target.tag}** a été expulsé.`
+        );
+
+        await sendModerationLog({
+
+          guild,
+
+          title:
+            "👢 Exclusion",
+
+          color:
+            0xED4245,
+
+          type:
+            "kick",
+
+          memberUser:
+            target,
+
+          moderator:
+            member.user,
+
+          reason,
+
+          proof
+        });
+
+        return;
+      }
+
+
+      // ================================================
+      // BAN
+      // ================================================
+
+      if (
+        commandName ===
+        "ban"
+      ) {
+
+        const target =
+          options.getUser(
+            "membre"
           );
 
-      const row =
-        new ActionRowBuilder()
-          .addComponents(menu);
+        const reason =
+          options.getString(
+            "raison"
+          ) ||
+          "Aucune raison fournie";
 
-      const embed =
-        new EmbedBuilder()
-          .setTitle("🎫 Ouvrir un ticket")
-          .setDescription(
-            "Sélectionne la catégorie correspondant à ta demande."
-          )
-          .setColor(0x5865F2);
-
-      await interaction.channel.send({
-        embeds: [embed],
-        components: [row]
-      });
-
-      return interaction.reply({
-        content:
-          "✅ Panneau de ticket envoyé.",
-        ephemeral: true
-      });
-    }
-  }
-
-  // ====================================================
-  // MENU CATÉGORIE TICKET
-  // ====================================================
-
-  if (
-    interaction.isStringSelectMenu() &&
-    interaction.customId === "ticket_category"
-  ) {
-    const category =
-      interaction.values[0];
-
-    if (category === "candidature") {
-      const menu =
-        new StringSelectMenuBuilder()
-          .setCustomId("ticket_candidature")
-          .setPlaceholder(
-            "Choisis le domaine de ta candidature"
-          )
-          .addOptions(
-            Object.entries(
-              candidatureCategories
-            ).map(([value, label]) => ({
-              label,
-              value,
-              emoji: "📩"
-            }))
+        const proof =
+          options.getAttachment(
+            "preuve"
           );
 
-      const row =
-        new ActionRowBuilder()
-          .addComponents(menu);
+        const targetMember =
+          await guild.members
+            .fetch(
+              target.id
+            )
+            .catch(
+              () => null
+            );
 
-      return interaction.reply({
-        content:
-          "📩 Choisis le domaine de ta candidature :",
-        components: [row],
-        ephemeral: true
-      });
-    }
+        if (
+          targetMember &&
+          !targetMember.bannable
+        ) {
 
-    await createTicket(
-      interaction,
-      category
-    );
-  }
+          return interaction.reply({
+            content:
+              "❌ Je ne peux pas bannir ce membre.",
 
-  // ====================================================
-  // MENU CANDIDATURE
-  // ====================================================
+            ephemeral:
+              true
+          });
+        }
 
-  if (
-    interaction.isStringSelectMenu() &&
-    interaction.customId === "ticket_candidature"
-  ) {
-    const type =
-      interaction.values[0];
+        markBotAction(
+          guild.id,
+          target.id,
+          "ban"
+        );
 
-    await createTicket(
-      interaction,
-      "candidature",
-      candidatureCategories[type]
-    );
-  }
-
-  // ====================================================
-  // BOUTON FERMETURE TICKET
-  // ====================================================
-
-  if (
-    interaction.isButton() &&
-    interaction.customId === "close_ticket"
-  ) {
-    await closeTicket(interaction);
-  }
-});
-
-// ======================================================
-// CRÉATION TICKET
-// ======================================================
-
-async function createTicket(
-  interaction,
-  category,
-  subCategory = null
-) {
-  const guild =
-    interaction.guild;
-
-  const existing =
-    guild.channels.cache.find(
-      channel =>
-        channel.type === ChannelType.GuildText &&
-        channel.topic === `ticket:${interaction.user.id}`
-    );
-
-  if (existing) {
-    return interaction.reply({
-      content:
-        `❌ Tu as déjà un ticket ouvert : ${existing}`,
-      ephemeral: true
-    });
-  }
-
-  let categoryChannel = null;
-
-  const possibleNames = [
-    `tickets-${category}`,
-    `ticket-${category}`,
-    category
-  ];
-
-  categoryChannel =
-    guild.channels.cache.find(
-      channel =>
-        channel.type === ChannelType.GuildCategory &&
-        possibleNames.includes(
-          channel.name.toLowerCase()
-        )
-    );
-
-  const safeName =
-    `ticket-${interaction.user.username}`
-      .toLowerCase()
-      .replace(/[^a-z0-9-_]/g, "")
-      .slice(0, 80);
-
-  const overwrites = [
-    {
-      id: guild.roles.everyone.id,
-      deny: ["ViewChannel"]
-    },
-    {
-      id: interaction.user.id,
-      allow: [
-        "ViewChannel",
-        "SendMessages",
-        "ReadMessageHistory"
-      ]
-    }
-  ];
-
-  if (guild.members.me) {
-    overwrites.push({
-      id: guild.members.me.id,
-      allow: [
-        "ViewChannel",
-        "SendMessages",
-        "ReadMessageHistory",
-        "ManageChannels"
-      ]
-    });
-  }
-
-  const channel =
-    await guild.channels.create({
-      name: safeName || "ticket",
-      type: ChannelType.GuildText,
-      parent:
-        categoryChannel?.id || null,
-      topic:
-        `ticket:${interaction.user.id}`,
-      permissionOverwrites:
-        overwrites
-    });
-
-  const closeButton =
-    new ButtonBuilder()
-      .setCustomId("close_ticket")
-      .setLabel("Fermer le ticket")
-      .setEmoji("🔒")
-      .setStyle(ButtonStyle.Danger);
-
-  const row =
-    new ActionRowBuilder()
-      .addComponents(closeButton);
-
-  const embed =
-    new EmbedBuilder()
-      .setTitle("🎫 Ticket ouvert")
-      .setDescription(
-        `Bienvenue ${interaction.user} !\n\n` +
-        `Un membre du staff viendra s'occuper de ta demande.\n\n` +
-        `**Catégorie :** ${ticketCategories[category]?.label || category}` +
-        (
-          subCategory
-            ? `\n**Domaine :** ${subCategory}`
-            : ""
-        )
-      )
-      .setColor(0x5865F2)
-      .setTimestamp();
-
-  await channel.send({
-    content:
-      `${interaction.user}`,
-    embeds: [embed],
-    components: [row]
-  });
-
-  const logChannel =
-    getLogChannel(
-      guild,
-      TICKET_LOG_CHANNEL_NAME
-    );
-
-  if (logChannel) {
-    const logEmbed =
-      new EmbedBuilder()
-        .setTitle("🎫 Ticket créé")
-        .addFields(
+        await guild.members.ban(
+          target.id,
           {
-            name: "👤 Utilisateur",
-            value:
-              `${interaction.user} \`${interaction.user.tag}\``
-          },
-          {
-            name: "📂 Catégorie",
-            value:
-              ticketCategories[category]?.label || category
-          },
-          {
-            name: "📌 Salon",
-            value:
-              `${channel}`
+            reason
           }
-        )
-        .setColor(0x57F287)
-        .setTimestamp();
+        );
 
-    if (subCategory) {
-      logEmbed.addFields({
-        name: "📋 Domaine",
-        value: subCategory
-      });
-    }
+        await interaction.reply(
+          `🔨 **${target.tag}** a été banni définitivement.`
+        );
 
-    logChannel.send({
-      embeds: [logEmbed]
-    }).catch(() => {});
-  }
+        await sendModerationLog({
 
-  return interaction.reply({
-    content:
-      `✅ Ton ticket a été créé : ${channel}`,
-    ephemeral: true
-  });
-}
+          guild,
 
-// ======================================================
-// FERMETURE TICKET
-// ======================================================
+          title:
+            "🔨 Bannissement",
 
-async function closeTicket(interaction) {
-  const channel =
-    interaction.channel;
+          color:
+            0xED4245,
 
-  if (!channel || channel.type !== ChannelType.GuildText) {
-    return interaction.reply({
-      content:
-        "❌ Ce salon n'est pas un ticket.",
-      ephemeral: true
-    });
-  }
+          type:
+            "ban",
 
-  const messages =
-    await fetchAllMessages(channel);
+          memberUser:
+            target,
 
-  const transcript =
-    messages
-      .reverse()
-      .map(message => {
-        const date =
-          new Date(
-            message.createdTimestamp
-          ).toLocaleString("fr-FR");
+          moderator:
+            member.user,
 
-        const content =
-          message.content || "[Aucun texte]";
+          reason,
 
-        return `[${date}] ${message.author.tag}: ${content}`;
-      })
-      .join("\n");
+          proof
+        });
 
-  const fileName =
-    `transcript-${channel.name}.txt`;
+        return;
+      }
 
-  const filePath =
-    `./${fileName}`;
 
-  fs.writeFileSync(
-    filePath,
-    transcript || "Aucun message."
-  );
+      // ================================================
+      // TEMPBAN
+      // ================================================
 
-  const logChannel =
-    getLogChannel(
-      interaction.guild,
-      TICKET_LOG_CHANNEL_NAME
-    );
+      if (
+        commandName ===
+        "tempban"
+      ) {
 
-  if (logChannel) {
-    const embed =
-      new EmbedBuilder()
-        .setTitle("🔒 Ticket fermé")
-        .addFields(
+        const target =
+          options.getUser(
+            "membre"
+          );
+
+        const durationInput =
+          options.getString(
+            "duree"
+          );
+
+        const reason =
+          options.getString(
+            "raison"
+          ) ||
+          "Aucune raison fournie";
+
+        const proof =
+          options.getAttachment(
+            "preuve"
+          );
+
+        const durationMs =
+          parseDuration(
+            durationInput
+          );
+
+        if (!durationMs) {
+
+          return interaction.reply({
+            content:
+              "❌ Durée invalide. Utilise par exemple `1d`, `4d`, `7d`, `14d` ou `28d`.",
+
+            ephemeral:
+              true
+          });
+        }
+
+        const targetMember =
+          await guild.members
+            .fetch(
+              target.id
+            )
+            .catch(
+              () => null
+            );
+
+        if (
+          targetMember &&
+          !targetMember.bannable
+        ) {
+
+          return interaction.reply({
+            content:
+              "❌ Je ne peux pas bannir ce membre.",
+
+            ephemeral:
+              true
+          });
+        }
+
+        const expiresAt =
+          Date.now() +
+          durationMs;
+
+        markBotAction(
+          guild.id,
+          target.id,
+          "ban"
+        );
+
+        await guild.members.ban(
+          target.id,
           {
-            name: "🎫 Ticket",
-            value: channel.name
-          },
-          {
-            name: "👮 Fermé par",
-            value:
-              `${interaction.user} \`${interaction.user.tag}\``
+            reason:
+              `Tempban ${formatDuration(durationMs)} — ${reason}`
           }
-        )
-        .setColor(0xED4245)
-        .setTimestamp();
+        );
 
-    await logChannel.send({
-      embeds: [embed],
-      files: [
-        new AttachmentBuilder(
-          filePath,
-          {
-            name: fileName
-          }
-        )
-      ]
-    }).catch(() => {});
-  }
+        addTempBan(
+          guild.id,
+          target.id,
+          expiresAt
+        );
 
-  await interaction.reply({
-    content:
-      "🔒 Fermeture du ticket dans quelques secondes..."
-  });
+        scheduleTempBan(
+          guild,
+          target.id,
+          expiresAt
+        );
 
-  setTimeout(() => {
-    fs.unlink(
-      filePath,
-      () => {}
-    );
+        await interaction.reply(
+          `⏳ **${target.tag}** a été banni pendant **${formatDuration(durationMs)}**.`
+        );
 
-    channel.delete().catch(() => {});
-  }, 3000);
-}
+        await sendModerationLog({
 
-// ======================================================
-// RÉCUPÉRATION DE TOUS LES MESSAGES
-// ======================================================
+          guild,
 
-async function fetchAllMessages(channel) {
-  const allMessages = [];
-  let lastId;
+          title:
+            "🔨 Bannissement temporaire",
 
-  while (true) {
-    const options = {
-      limit: 100
-    };
+          color:
+            0xED4245,
 
-    if (lastId) {
-      options.before = lastId;
-    }
+          type:
+            "tempban",
 
-    const messages =
-      await channel.messages.fetch(options);
+          memberUser:
+            target,
 
-    if (!messages.size) {
-      break;
-    }
+          moderator:
+            member.user,
 
-    allMessages.push(
-      ...messages.values()
-    );
+          reason,
 
-    lastId =
-      messages.last().id;
+          duration:
+            formatDuration(
+              durationMs
+            ),
 
-    if (messages.size < 100) {
-      break;
-    }
-  }
+          expires:
+            new Date(
+              expiresAt
+            ),
 
-  return allMessages;
-}
+          proof
+        });
 
-// ======================================================
-// MEMBRE REJOINT
-// ======================================================
+        return;
+      }
 
-client.on("guildMemberAdd", member => {
-  const welcomeChannel =
-    getLogChannel(
-      member.guild,
-      WELCOME_CHANNEL_NAME
-    );
 
-  if (welcomeChannel) {
-    const accountAgeDays =
-      Math.floor(
-        (Date.now() -
-          member.user.createdTimestamp) /
-          (1000 * 60 * 60 * 24)
-      );
+      // ================================================
+      // TIMEOUT
+      // ================================================
 
-    const welcomeEmbed =
-      new EmbedBuilder()
-        .setAuthor({
-          name: member.user.tag,
-          iconURL:
-            member.user.displayAvatarURL()
-        })
-        .setTitle(
-          "🎉 Nouveau membre sur le serveur !"
-        )
-        .setDescription(
-          `🎉 Bienvenue ${member} sur **${member.guild.name}** !`
-        )
-        .addFields(
-          {
-            name: "🆔 ID",
-            value:
-              `${member.user.id}`
-          },
-          {
-            name: "🕒 Compte créé",
-            value:
-              `il y a ${accountAgeDays} jour${accountAgeDays !== 1 ? "s" : ""}`
-          },
-          {
-            name: "📥 Rejoint",
-            value:
-              `<t:${Math.floor(
-                Date.now() / 1000
-              )}:F>`
-          }
-        )
-        .setThumbnail(
-          member.user.displayAvatarURL({
-            size: 256
-          })
-        )
-        .setColor(0x57F287)
-        .setFooter({
-          text:
-            `Membre #${member.guild.memberCount} | ${member.guild.name}`
-        })
-        .setTimestamp();
+      if (
+        commandName ===
+        "timeout"
+      ) {
 
-    welcomeChannel
-      .send({
-        content: `${member}`,
-        embeds: [welcomeEmbed]
-      })
-      .catch(() => {});
-  }
+        const target =
+          options.getUser(
+            "membre"
+          );
 
-  // Message public avec image de bienvenue générée
-  const publicWelcomeChannel =
-    getLogChannel(
-      member.guild,
-      ARRIVAL_CHANNEL_NAME
-    );
+        const durationInput =
+          options.getString(
+            "duree"
+          );
 
-  if (publicWelcomeChannel) {
-    generateWelcomeImage(member)
-      .then(buffer => {
-        const attachment =
-          new AttachmentBuilder(
-            buffer,
+        const reason =
+          options.getString(
+            "raison"
+          ) ||
+          "Aucune raison fournie";
+
+        const proof =
+          options.getAttachment(
+            "preuve"
+          );
+
+        const durationMs =
+          parseDuration(
+            durationInput
+          );
+
+        if (!durationMs) {
+
+          return interaction.reply({
+            content:
+              "❌ Durée invalide. Utilise `5m`, `1h`, `1d`, `4d`, etc.",
+
+            ephemeral:
+              true
+          });
+        }
+
+        if (
+          durationMs >
+          28 *
+          24 *
+          60 *
+          60 *
+          1000
+        ) {
+
+          return interaction.reply({
+            content:
+              "❌ Un timeout Discord ne peut pas dépasser 28 jours.",
+
+            ephemeral:
+              true
+          });
+        }
+
+        const targetMember =
+          await guild.members
+            .fetch(
+              target.id
+            )
+            .catch(
+              () => null
+            );
+
+        if (!targetMember) {
+
+          return interaction.reply({
+            content:
+              "❌ Membre introuvable.",
+
+            ephemeral:
+              true
+          });
+        }
+
+        if (
+          !targetMember.moderatable
+        ) {
+
+          return interaction.reply({
+            content:
+              "❌ Je ne peux pas exclure ce membre.",
+
+            ephemeral:
+              true
+          });
+        }
+
+        const expiresAt =
+          Date.now() +
+          durationMs;
+
+        markBotAction(
+          guild.id,
+          target.id,
+          "timeout"
+        );
+
+        await targetMember.timeout(
+          durationMs,
+          reason
+        );
+
+        await interaction.reply(
+          `⏳ **${target.tag}** a été exclu pendant **${formatDuration(durationMs)}**.`
+        );
+
+        await sendModerationLog({
+
+          guild,
+
+          title:
+            "🔨 Exclusion (timeout)",
+
+          color:
+            0xFEE75C,
+
+          type:
+            "timeout",
+
+          memberUser:
+            target,
+
+          moderator:
+            member.user,
+
+          reason,
+
+          duration:
+            formatDuration(
+              durationMs
+            ),
+
+          expires:
+            new Date(
+              expiresAt
+            ),
+
+          proof
+        });
+
+        return;
+      }
+
+
+      // ================================================
+      // WARN
+      // ================================================
+
+      if (
+        commandName ===
+        "warn"
+      ) {
+
+        const target =
+          options.getUser(
+            "membre"
+          );
+
+        const reason =
+          options.getString(
+            "raison"
+          ) ||
+          "Aucune raison fournie";
+
+        const proof =
+          options.getAttachment(
+            "preuve"
+          );
+
+        const warningsBefore =
+          getWarnings(
+            guild.id,
+            target.id
+          ).length;
+
+        const caseNumber =
+          createCase(
+            guild.id,
             {
-              name: "bienvenue.png"
+
+              type:
+                "warn",
+
+              userId:
+                target.id,
+
+              userTag:
+                target.tag,
+
+              moderatorId:
+                member.user.id,
+
+              moderatorTag:
+                member.user.tag,
+
+              reason,
+
+              duration:
+                null,
+
+              expiresAt:
+                null,
+
+              proof:
+                proof?.url ??
+                null
             }
           );
 
-        publicWelcomeChannel
-          .send({
-            content:
-              `👋 Bienvenue ${member} !`,
-            files: [attachment]
-          })
-          .catch(() => {});
-      })
-      .catch(err => {
-        console.error(
-          "Erreur génération image bienvenue :",
-          err
+        await interaction.reply(
+          `⚠️ **${target.tag}** a reçu un avertissement. (Warn #${warningsBefore + 1})`
         );
 
-        publicWelcomeChannel
-          .send(
-            `👋 Bienvenue ${member} sur **${member.guild.name}** !`
-          )
-          .catch(() => {});
-      });
-  }
+        const channel =
+          getLogChannel(
+            guild,
+            MODERATION_LOG_CHANNEL_NAME
+          );
 
-  // IMPORTANT :
-  // Aucun log d'arrivée n'est envoyé dans 📋・logs.
-});
+        if (channel) {
 
-// ======================================================
-// MEMBRE QUITTE
-// ======================================================
+          const embed =
+            new EmbedBuilder()
 
-client.on("guildMemberRemove", async member => {
-  // ----------------------------------------------------
-  // Vérification si c'était un KICK
-  // ----------------------------------------------------
+              .setTitle(
+                "⚠️ Avertissement"
+              )
 
-  try {
-    const auditLogs =
-      await member.guild.fetchAuditLogs({
-        type: AuditLogEvent.MemberKick,
-        limit: 10
-      });
+              .setColor(
+                0xFEE75C
+              )
 
-    const kickEntry =
-      auditLogs.entries.find(
-        entry =>
-          entry.target?.id === member.id &&
-          Date.now() -
-            entry.createdTimestamp <
-            10000
-      );
+              .setThumbnail(
+                target.displayAvatarURL({
+                  extension:
+                    "png",
 
-    if (kickEntry) {
-      const moderator =
-        kickEntry.executor;
+                  size:
+                    256
+                })
+              )
 
-      const reason =
-        kickEntry.reason ||
-        "Aucune raison fournie";
+              .addFields(
 
-      const caseData =
-        createCase({
-          guild: member.guild,
-          user: member.user,
-          moderator,
-          action: "KICK",
+                {
+                  name:
+                    "👤 Membre",
+
+                  value:
+                    `${target.tag} (\`${target.id}\`)`,
+
+                  inline:
+                    false
+                },
+
+                {
+                  name:
+                    "🛡️ Modérateur",
+
+                  value:
+                    `${member.user.tag} (\`${member.user.id}\`)`,
+
+                  inline:
+                    false
+                },
+
+                {
+                  name:
+                    "🔢 Nombre de warns",
+
+                  value:
+                    `${warningsBefore + 1}`,
+
+                  inline:
+                    true
+                },
+
+                {
+                  name:
+                    "📝 Raison",
+
+                  value:
+                    cleanText(
+                      reason
+                    ),
+
+                  inline:
+                    false
+                }
+              );
+
+          if (proof) {
+
+            embed.addFields({
+              name:
+                "📎 Preuves",
+
+              value:
+                `[Voir la preuve](${proof.url})`,
+
+              inline:
+                false
+            });
+          }
+
+          embed
+
+            .addFields({
+              name:
+                "📁 Case",
+
+              value:
+                `#${caseNumber}`,
+
+              inline:
+                false
+            })
+
+            .setFooter({
+              text:
+                `Case #${caseNumber}`
+            })
+
+            .setTimestamp();
+
+          await channel.send({
+            embeds:
+              [embed]
+          }).catch(
+            () => {}
+          );
+        }
+
+        return;
+      }
+
+
+      // ================================================
+      // WARNINGS
+      // ================================================
+
+      if (
+        commandName ===
+        "warnings"
+      ) {
+
+        const target =
+          options.getUser(
+            "membre"
+          );
+
+        const warnings =
+          getWarnings(
+            guild.id,
+            target.id
+          );
+
+        if (
+          !warnings.length
+        ) {
+
+          return interaction.reply({
+            content:
+              `✅ **${target.tag}** n'a aucun avertissement enregistré.`,
+
+            ephemeral:
+              true
+          });
+        }
+
+        const description =
+          warnings
+            .slice(-10)
+            .map(
+              w =>
+                `**Case #${w.case}** — ${w.reason}\n> Modérateur : ${w.moderatorTag} • ${formatDiscordDate(w.createdAt)}`
+            )
+            .join(
+              "\n\n"
+            );
+
+        const embed =
+          new EmbedBuilder()
+
+            .setTitle(
+              `⚠️ Avertissements — ${target.tag}`
+            )
+
+            .setDescription(
+              description
+            )
+
+            .setThumbnail(
+              target.displayAvatarURL({
+                extension:
+                  "png",
+
+                size:
+                  256
+              })
+            )
+
+            .setColor(
+              0xFEE75C
+            )
+
+            .setFooter({
+              text:
+                `${warnings.length} avertissement(s) enregistré(s)`
+            })
+
+            .setTimestamp();
+
+        return interaction.reply({
+          embeds:
+            [embed],
+
+          ephemeral:
+            true
+        });
+      }
+
+
+      // ================================================
+      // CLEAR WARNINGS
+      // ================================================
+
+      if (
+        commandName ===
+        "clearwarnings"
+      ) {
+
+        const target =
+          options.getUser(
+            "membre"
+          );
+
+        const count =
+          clearWarnings(
+            guild.id,
+            target.id
+          );
+
+        if (!count) {
+
+          return interaction.reply({
+            content:
+              `ℹ️ **${target.tag}** n'a aucun avertissement à supprimer.`,
+
+            ephemeral:
+              true
+          });
+        }
+
+        await interaction.reply(
+          `🧹 **${count}** avertissement(s) supprimé(s) pour **${target.tag}**.`
+        );
+
+        await sendLog(
+
+          guild,
+
+          "🧹 Avertissements supprimés",
+
+          null,
+
+          MODERATION_LOG_CHANNEL_NAME,
+
+          [
+
+            {
+              name:
+                "👤 Membre",
+
+              value:
+                `${target.tag} (\`${target.id}\`)`,
+
+              inline:
+                false
+            },
+
+            {
+              name:
+                "🛡️ Modérateur",
+
+              value:
+                `${member.user.tag} (\`${member.user.id}\`)`,
+
+              inline:
+                false
+            },
+
+            {
+              name:
+                "🔢 Nombre",
+
+              value:
+                `${count}`,
+
+              inline:
+                true
+            }
+          ],
+
+          0x57F287
+        );
+
+        return;
+      }
+
+
+      // ================================================
+      // UNBAN
+      // ================================================
+
+      if (
+        commandName ===
+        "unban"
+      ) {
+
+        const userId =
+          options.getString(
+            "membre"
+          );
+
+        const reason =
+          options.getString(
+            "raison"
+          ) ||
+          "Aucune raison fournie";
+
+        const user =
+          await client.users
+            .fetch(
+              userId
+            )
+            .catch(
+              () => null
+            );
+
+        if (!user) {
+
+          return interaction.reply({
+            content:
+              "❌ Utilisateur introuvable.",
+
+            ephemeral:
+              true
+          });
+        }
+
+        const ban =
+          await guild.bans
+            .fetch(
+              user.id
+            )
+            .catch(
+              () => null
+            );
+
+        if (!ban) {
+
+          return interaction.reply({
+            content:
+              "ℹ️ Cet utilisateur n'est pas banni.",
+
+            ephemeral:
+              true
+          });
+        }
+
+        markBotAction(
+          guild.id,
+          user.id,
+          "unban"
+        );
+
+        removeTempBan(
+          guild.id,
+          user.id
+        );
+
+        await guild.members.unban(
+          user.id,
+          reason
+        );
+
+        await interaction.reply(
+          `🔓 **${user.tag}** a été débanni.`
+        );
+
+        await sendModerationLog({
+
+          guild,
+
+          title:
+            "🔓 Débannissement",
+
+          color:
+            0x57F287,
+
+          type:
+            "unban",
+
+          memberUser:
+            user,
+
+          moderator:
+            member.user,
+
           reason
         });
 
+        return;
+      }
+
+
+      // ================================================
+      // CASE
+      // ================================================
+
+      if (
+        commandName ===
+        "case"
+      ) {
+
+        const number =
+          options.getInteger(
+            "numero"
+          );
+
+        const record =
+          findCase(
+            guild.id,
+            number
+          );
+
+        if (!record) {
+
+          return interaction.reply({
+            content:
+              `❌ La case **#${number}** n'existe pas.`,
+
+            ephemeral:
+              true
+          });
+        }
+
+        const embed =
+          new EmbedBuilder()
+
+            .setTitle(
+              `📁 Case #${record.case}`
+            )
+
+            .setColor(
+              0x5865F2
+            )
+
+            .addFields(
+
+              {
+                name:
+                  "🔨 Type",
+
+                value:
+                  record.type ||
+                  "Inconnu",
+
+                inline:
+                  true
+              },
+
+              {
+                name:
+                  "👤 Membre",
+
+                value:
+                  `${record.userTag || "Inconnu"} (\`${record.userId || "Inconnu"}\`)`,
+
+                inline:
+                  false
+              },
+
+              {
+                name:
+                  "🛡️ Modérateur",
+
+                value:
+                  `${record.moderatorTag || "Inconnu"} (\`${record.moderatorId || "Inconnu"}\`)`,
+
+                inline:
+                  false
+              },
+
+              {
+                name:
+                  "📝 Raison",
+
+                value:
+                  cleanText(
+                    record.reason
+                  ),
+
+                inline:
+                  false
+              },
+
+              {
+                name:
+                  "🕐 Date",
+
+                value:
+                  formatDiscordDate(
+                    record.createdAt
+                  ),
+
+                inline:
+                  true
+              }
+            )
+
+            .setTimestamp();
+
+        if (
+          record.duration
+        ) {
+
+          embed.addFields({
+            name:
+              "⏱️ Durée",
+
+            value:
+              record.duration,
+
+            inline:
+              true
+          });
+        }
+
+        if (
+          record.expiresAt
+        ) {
+
+          embed.addFields({
+            name:
+              "📅 Expire",
+
+            value:
+              formatDiscordDate(
+                record.expiresAt
+              ),
+
+            inline:
+              true
+          });
+        }
+
+        if (
+          record.proof
+        ) {
+
+          embed.addFields({
+            name:
+              "📎 Preuve",
+
+            value:
+              `[Voir la preuve](${record.proof})`,
+
+            inline:
+              false
+          });
+        }
+
+        return interaction.reply({
+          embeds:
+            [embed],
+
+          ephemeral:
+            true
+        });
+      }
+
+
+      // ================================================
+      // CLEAR
+      // ================================================
+
+      if (
+        commandName ===
+        "clear"
+      ) {
+
+        const nombre =
+          options.getInteger(
+            "nombre"
+          );
+
+        const deleted =
+          await interaction.channel
+            .bulkDelete(
+              nombre,
+              true
+            )
+            .catch(
+              () => null
+            );
+
+        if (!deleted) {
+
+          return interaction.reply({
+            content:
+              "❌ Impossible de supprimer ces messages. Certains peuvent avoir plus de 14 jours.",
+
+            ephemeral:
+              true
+          });
+        }
+
+        await interaction.reply({
+
+          content:
+            `🧹 ${deleted.size} messages supprimés.`,
+
+          ephemeral:
+            true
+        });
+
+        await sendLog(
+
+          guild,
+
+          "🧹 Messages supprimés",
+
+          null,
+
+          MODERATION_LOG_CHANNEL_NAME,
+
+          [
+
+            {
+              name:
+                "🛡️ Modérateur",
+
+              value:
+                `${member.user.tag} (\`${member.user.id}\`)`,
+
+              inline:
+                false
+            },
+
+            {
+              name:
+                "📍 Salon",
+
+              value:
+                `${interaction.channel}`,
+
+              inline:
+                true
+            },
+
+            {
+              name:
+                "🔢 Nombre",
+
+              value:
+                `${deleted.size}`,
+
+              inline:
+                true
+            }
+          ],
+
+          0x5865F2
+        );
+
+        return;
+      }
+
+
+      // ================================================
+      // TICKET PANEL
+      // ================================================
+
+      if (
+        commandName ===
+        "ticket-panel"
+      ) {
+
+        await interaction.channel.send(
+          buildTicketPanel()
+        );
+
+        await interaction.reply({
+
+          content:
+            "✅ Panneau de tickets envoyé.",
+
+          ephemeral:
+            true
+        });
+
+        return;
+      }
+    }
+
+
+    // ==================================================
+    // MENU TICKET
+    // ==================================================
+
+    if (
+      interaction.isStringSelectMenu() &&
+      interaction.customId ===
+        "ticket_category_select"
+    ) {
+
+      const category =
+        TICKET_CATEGORIES.find(
+          c =>
+            c.value ===
+            interaction.values[0]
+        );
+
+      if (!category) {
+        return;
+      }
+
+      if (
+        category.hasSubcategories
+      ) {
+
+        const subEmbed =
+          new EmbedBuilder()
+
+            .setTitle(
+              "📋 Candidature"
+            )
+
+            .setDescription(
+
+              "Pour quel secteur souhaitez-vous postuler ?\n\n" +
+
+              CANDIDATURE_SUBCATEGORIES
+                .map(
+                  s =>
+                    `${s.emoji} — **${s.label}**`
+                )
+                .join(
+                  "\n"
+                ) +
+
+              "\n\nSélectionnez une option ci-dessous pour ouvrir votre ticket de candidature."
+            )
+
+            .setColor(
+              0x5865F2
+            );
+
+        const subMenu =
+          new StringSelectMenuBuilder()
+
+            .setCustomId(
+              "candidature_subcategory_select"
+            )
+
+            .setPlaceholder(
+              "Sélectionnez le secteur visé"
+            )
+
+            .addOptions(
+              CANDIDATURE_SUBCATEGORIES.map(
+                s => ({
+
+                  label:
+                    s.label,
+
+                  value:
+                    s.value,
+
+                  emoji:
+                    s.emoji,
+
+                  description:
+                    s.description
+                })
+              )
+            );
+
+        return interaction.reply({
+
+          embeds:
+            [subEmbed],
+
+          components:
+            [
+              new ActionRowBuilder()
+                .addComponents(
+                  subMenu
+                )
+            ],
+
+          ephemeral:
+            true
+        });
+      }
+
+      await interaction.deferReply({
+        ephemeral:
+          true
+      });
+
+      await createTicketChannel(
+        interaction,
+        guild,
+        category
+      );
+
+      return;
+    }
+
+
+    // ==================================================
+    // SOUS-CATÉGORIE
+    // ==================================================
+
+    if (
+      interaction.isStringSelectMenu() &&
+      interaction.customId ===
+        "candidature_subcategory_select"
+    ) {
+
+      const subCategory =
+        CANDIDATURE_SUBCATEGORIES.find(
+          s =>
+            s.value ===
+            interaction.values[0]
+        );
+
+      if (!subCategory) {
+        return;
+      }
+
+      await interaction.deferReply({
+        ephemeral:
+          true
+      });
+
+      await createTicketChannel(
+        interaction,
+        guild,
+        subCategory
+      );
+
+      return;
+    }
+
+
+    // ==================================================
+    // FERMETURE TICKET
+    // ==================================================
+
+    if (
+      interaction.isButton() &&
+      interaction.customId ===
+        "close_ticket"
+    ) {
+
+      await interaction.reply({
+
+        content:
+          "🔒 Ce ticket sera fermé dans 5 secondes..."
+      });
+
+      const ticketLogChannel =
+        getLogChannel(
+          guild,
+          TICKET_LOG_CHANNEL_NAME
+        );
+
+      if (
+        ticketLogChannel
+      ) {
+
+        try {
+
+          const transcriptText =
+            await generateTranscript(
+              interaction.channel
+            );
+
+          const transcript =
+            new AttachmentBuilder(
+
+              Buffer.from(
+                transcriptText,
+                "utf-8"
+              ),
+
+              {
+                name:
+                  `transcript-${interaction.channel.name}.txt`
+              }
+            );
+
+          const closeEmbed =
+            new EmbedBuilder()
+
+              .setTitle(
+                "🔒 Ticket fermé"
+              )
+
+              .setDescription(
+                `Ticket **${interaction.channel.name}** fermé par **${member.user.tag}**`
+              )
+
+              .addFields({
+
+                name:
+                  "🛡️ Modérateur",
+
+                value:
+                  `${member.user.tag} (\`${member.user.id}\`)`,
+
+                inline:
+                  false
+              })
+
+              .setColor(
+                0xED4245
+              )
+
+              .setTimestamp();
+
+          await ticketLogChannel.send({
+
+            embeds:
+              [closeEmbed],
+
+            files:
+              [transcript]
+          });
+
+        } catch (error) {
+
+          console.error(
+            "Erreur génération transcript :",
+            error
+          );
+
+          await sendLog(
+
+            guild,
+
+            "🔒 Ticket fermé",
+
+            `Ticket **${interaction.channel.name}** fermé par **${member.user.tag}**\n⚠️ Transcript non généré.`,
+
+            TICKET_LOG_CHANNEL_NAME
+          );
+        }
+      }
+
+      setTimeout(
+        () => {
+
+          interaction.channel
+            .delete()
+            .catch(
+              () => {}
+            );
+
+        },
+
+        5000
+      );
+
+      return;
+    }
+  }
+);
+
+
+// ======================================================
+// MEMBRE ARRIVE
+// ======================================================
+
+client.on(
+  "guildMemberAdd",
+  member => {
+
+    sendLog(
+
+      member.guild,
+
+      "👋 Membre arrivé",
+
+      null,
+
+      LOG_CHANNEL_NAME,
+
+      [
+
+        {
+          name:
+            "👤 Membre",
+
+          value:
+            `${member.user.tag} (\`${member.user.id}\`)`,
+
+          inline:
+            false
+        }
+      ],
+
+      0x57F287
+    );
+
+    const welcomeChannel =
+      getLogChannel(
+        member.guild,
+        WELCOME_CHANNEL_NAME
+      );
+
+    if (
+      welcomeChannel
+    ) {
+
+      const accountAgeDays =
+        Math.floor(
+
+          (
+            Date.now() -
+            member.user.createdTimestamp
+          ) /
+
+          86400000
+        );
+
+      const welcomeEmbed =
+        new EmbedBuilder()
+
+          .setAuthor({
+
+            name:
+              member.user.tag,
+
+            iconURL:
+              member.user.displayAvatarURL()
+          })
+
+          .setTitle(
+            "🎉 Nouveau membre sur le serveur !"
+          )
+
+          .setDescription(
+            `🎉 Bienvenue ${member} sur **${member.guild.name}** !`
+          )
+
+          .addFields(
+
+            {
+              name:
+                "🆔 ID",
+
+              value:
+                member.user.id
+            },
+
+            {
+              name:
+                "🕒 Compte créé",
+
+              value:
+                `il y a ${accountAgeDays} jour${accountAgeDays !== 1 ? "s" : ""}`
+            },
+
+            {
+              name:
+                "📥 Rejoint",
+
+              value:
+                `<t:${Math.floor(
+                  Date.now() / 1000
+                )}:F>`
+            }
+          )
+
+          .setThumbnail(
+            member.user.displayAvatarURL({
+              size:
+                256
+            })
+          )
+
+          .setColor(
+            0x57F287
+          )
+
+          .setFooter({
+
+            text:
+              `Membre #${member.guild.memberCount} | ${member.guild.name}`
+          })
+
+          .setTimestamp();
+
+      welcomeChannel.send({
+
+        content:
+          `${member}`,
+
+        embeds:
+          [welcomeEmbed]
+
+      }).catch(
+        () => {}
+      );
+    }
+
+
+    const publicWelcomeChannel =
+      getLogChannel(
+        member.guild,
+        PUBLIC_WELCOME_CHANNEL_NAME
+      );
+
+    if (
+      publicWelcomeChannel
+    ) {
+
+      generateWelcomeImage(
+        member
+      )
+
+        .then(
+          buffer =>
+
+            publicWelcomeChannel.send({
+
+              content:
+                `👋 Bienvenue ${member} !`,
+
+              files:
+                [
+                  new AttachmentBuilder(
+                    buffer,
+                    {
+                      name:
+                        "bienvenue.png"
+                    }
+                  )
+                ]
+            })
+        )
+
+        .catch(
+          () =>
+
+            publicWelcomeChannel
+              .send(
+                `👋 Bienvenue ${member} sur **${member.guild.name}** !`
+              )
+
+              .catch(
+                () => {}
+              )
+        );
+    }
+  }
+);
+
+
+// ======================================================
+// MEMBRE QUITTE / KICK DIRECT
+// ======================================================
+
+client.on(
+  "guildMemberRemove",
+  async member => {
+
+    if (
+      consumeBotAction(
+        member.guild.id,
+        member.user.id,
+        "kick"
+      )
+    ) {
+      return;
+    }
+
+    let executor =
+      null;
+
+    let reason =
+      "A quitté le serveur";
+
+    let wasKick =
+      false;
+
+    try {
+
+      const logs =
+        await member.guild.fetchAuditLogs({
+
+          type:
+            AuditLogEvent.MemberKick,
+
+          limit:
+            10
+        });
+
+      const entry =
+        logs.entries.find(
+          e =>
+
+            e.target?.id ===
+            member.user.id &&
+
+            Date.now() -
+              e.createdTimestamp <
+              15000
+        );
+
+      if (entry) {
+
+        wasKick =
+          true;
+
+        executor =
+          entry.executor;
+
+        reason =
+          entry.reason ||
+          "Aucune raison fournie";
+      }
+
+    } catch (error) {
+
+      console.error(
+        "Impossible de lire les logs d'audit (kick) :",
+        error
+      );
+    }
+
+    if (
+      wasKick
+    ) {
+
       await sendModerationLog({
-        guild: member.guild,
-        action: "KICK",
-        target: member,
-        moderator,
-        reason,
-        caseData
+
+        guild:
+          member.guild,
+
+        title:
+          "👢 Exclusion",
+
+        color:
+          0xED4245,
+
+        type:
+          "kick",
+
+        memberUser:
+          member.user,
+
+        moderator:
+          executor ||
+          {
+            tag:
+              "Inconnu",
+
+            id:
+              "Inconnu"
+          },
+
+        reason
       });
 
       return;
     }
-  } catch (error) {
-    console.error(
-      "Erreur détection kick :",
-      error
-    );
-  }
 
-  // ----------------------------------------------------
-  // Départ normal
-  // ----------------------------------------------------
+    await sendLog(
 
-  const goodbyeChannel =
-    getLogChannel(
       member.guild,
-      GOODBYE_CHANNEL_NAME
+
+      "👋 Membre parti",
+
+      null,
+
+      LOG_CHANNEL_NAME,
+
+      [
+
+        {
+          name:
+            "👤 Membre",
+
+          value:
+            `${member.user.tag} (\`${member.user.id}\`)`,
+
+          inline:
+            false
+        }
+      ],
+
+      0xED4245
     );
 
-  if (goodbyeChannel) {
-    const goodbyeEmbed =
-      new EmbedBuilder()
-        .setAuthor({
-          name: member.user.tag,
-          iconURL:
-            member.user.displayAvatarURL()
-        })
-        .setTitle(
-          "😢 Un membre nous quitte..."
-        )
-        .setDescription(
-          `**${member.user.tag}** a quitté **${member.guild.name}**.`
-        )
-        .addFields(
-          {
-            name: "🆔 ID",
-            value:
-              `${member.user.id}`
-          },
-          {
-            name: "👥 Membres restants",
-            value:
-              `${member.guild.memberCount}`
-          }
-        )
-        .setThumbnail(
-          member.user.displayAvatarURL({
-            size: 256
+
+    const goodbyeChannel =
+      getLogChannel(
+        member.guild,
+        GOODBYE_CHANNEL_NAME
+      );
+
+    if (
+      goodbyeChannel
+    ) {
+
+      const goodbyeEmbed =
+        new EmbedBuilder()
+
+          .setAuthor({
+
+            name:
+              member.user.tag,
+
+            iconURL:
+              member.user.displayAvatarURL()
           })
-        )
-        .setColor(0xED4245)
-        .setFooter({
-          text:
-            member.guild.name
-        })
-        .setTimestamp();
 
-    goodbyeChannel
-      .send({
-        embeds: [goodbyeEmbed]
-      })
-      .catch(() => {});
+          .setTitle(
+            "😢 Un membre nous quitte..."
+          )
+
+          .setDescription(
+            `**${member.user.tag}** a quitté **${member.guild.name}**.`
+          )
+
+          .addFields(
+
+            {
+              name:
+                "🆔 ID",
+
+              value:
+                member.user.id
+            },
+
+            {
+              name:
+                "👥 Membres restants",
+
+              value:
+                `${member.guild.memberCount}`
+            }
+          )
+
+          .setThumbnail(
+            member.user.displayAvatarURL({
+              size:
+                256
+            })
+          )
+
+          .setColor(
+            0xED4245
+          )
+
+          .setFooter({
+
+            text:
+              member.guild.name
+          })
+
+          .setTimestamp();
+
+      goodbyeChannel.send({
+
+        embeds:
+          [goodbyeEmbed]
+
+      }).catch(
+        () => {}
+      );
+    }
   }
+);
 
-  // IMPORTANT :
-  // Aucun log de départ n'est envoyé dans 📋・logs.
-});
 
 // ======================================================
-// LOGS MESSAGES SUPPRIMÉS
+// TIMEOUT DIRECTEMENT DEPUIS DISCORD
+// ======================================================
+
+client.on(
+  "guildMemberUpdate",
+  async (
+    oldMember,
+    newMember
+  ) => {
+
+    const oldTimeout =
+      oldMember.communicationDisabledUntilTimestamp ||
+      null;
+
+    const newTimeout =
+      newMember.communicationDisabledUntilTimestamp ||
+      null;
+
+    if (
+      oldTimeout ===
+      newTimeout
+    ) {
+      return;
+    }
+
+
+    // ================================================
+    // TIMEOUT RETIRÉ
+    // ================================================
+
+    if (!newTimeout) {
+
+      if (
+        consumeBotAction(
+          newMember.guild.id,
+          newMember.user.id,
+          "timeout"
+        )
+      ) {
+        return;
+      }
+
+      let executor =
+        null;
+
+      let reason =
+        "Timeout retiré";
+
+      try {
+
+        const logs =
+          await newMember.guild.fetchAuditLogs({
+
+            type:
+              AuditLogEvent.MemberUpdate,
+
+            limit:
+              10
+          });
+
+        const entry =
+          logs.entries.find(
+            e =>
+
+              e.target?.id ===
+              newMember.user.id &&
+
+              Date.now() -
+                e.createdTimestamp <
+                15000
+          );
+
+        if (entry) {
+
+          executor =
+            entry.executor;
+
+          reason =
+            entry.reason ||
+            reason;
+        }
+
+      } catch (error) {
+
+        console.error(
+          "Audit timeout remove :",
+          error
+        );
+      }
+
+      await sendLog(
+
+        newMember.guild,
+
+        "🔓 Timeout retiré",
+
+        null,
+
+        MODERATION_LOG_CHANNEL_NAME,
+
+        [
+
+          {
+            name:
+              "👤 Membre",
+
+            value:
+              `${newMember.user.tag} (\`${newMember.user.id}\`)`,
+
+            inline:
+              false
+          },
+
+          {
+            name:
+              "🛡️ Modérateur",
+
+            value:
+              `${executor?.tag || "Inconnu"} (\`${executor?.id || "Inconnu"}\`)`,
+
+            inline:
+              false
+          },
+
+          {
+            name:
+              "📝 Raison",
+
+            value:
+              reason,
+
+            inline:
+              false
+          }
+        ],
+
+        0x57F287
+      );
+
+      return;
+    }
+
+
+    // ================================================
+    // TIMEOUT AJOUTÉ PAR LE BOT
+    // ================================================
+
+    if (
+      consumeBotAction(
+        newMember.guild.id,
+        newMember.user.id,
+        "timeout"
+      )
+    ) {
+      return;
+    }
+
+
+    let executor =
+      null;
+
+    let reason =
+      "Aucune raison fournie";
+
+    try {
+
+      const logs =
+        await newMember.guild.fetchAuditLogs({
+
+          type:
+            AuditLogEvent.MemberUpdate,
+
+          limit:
+            10
+        });
+
+      const entry =
+        logs.entries.find(
+          e =>
+
+            e.target?.id ===
+            newMember.user.id &&
+
+            Date.now() -
+              e.createdTimestamp <
+              15000
+        );
+
+      if (entry) {
+
+        executor =
+          entry.executor;
+
+        reason =
+          entry.reason ||
+          reason;
+      }
+
+    } catch (error) {
+
+      console.error(
+        "Impossible de lire les logs d'audit (timeout) :",
+        error
+      );
+    }
+
+    const expiresAt =
+      new Date(
+        newTimeout
+      );
+
+    const durationMs =
+      newTimeout -
+      Date.now();
+
+    await sendModerationLog({
+
+      guild:
+        newMember.guild,
+
+      title:
+        "🔨 Exclusion (timeout)",
+
+      color:
+        0xFEE75C,
+
+      type:
+        "timeout",
+
+      memberUser:
+        newMember.user,
+
+      moderator:
+        executor ||
+        {
+          tag:
+            "Inconnu",
+
+          id:
+            "Inconnu"
+        },
+
+      reason,
+
+      duration:
+        formatDuration(
+          durationMs
+        ),
+
+      expires:
+        expiresAt
+    });
+  }
+);
+
+
+// ======================================================
+// BAN DIRECTEMENT DEPUIS DISCORD
+// ======================================================
+
+client.on(
+  "guildBanAdd",
+  async ban => {
+
+    if (
+      consumeBotAction(
+        ban.guild.id,
+        ban.user.id,
+        "ban"
+      )
+    ) {
+      return;
+    }
+
+    let executor =
+      null;
+
+    let reason =
+      ban.reason ||
+      "Aucune raison fournie";
+
+    try {
+
+      const logs =
+        await ban.guild.fetchAuditLogs({
+
+          type:
+            AuditLogEvent.MemberBanAdd,
+
+          limit:
+            10
+        });
+
+      const entry =
+        logs.entries.find(
+          e =>
+
+            e.target?.id ===
+            ban.user.id &&
+
+            Date.now() -
+              e.createdTimestamp <
+              15000
+        );
+
+      if (entry) {
+
+        executor =
+          entry.executor;
+
+        reason =
+          entry.reason ||
+          reason;
+      }
+
+    } catch (error) {
+
+      console.error(
+        "Impossible de lire les logs d'audit (ban) :",
+        error
+      );
+    }
+
+    await sendModerationLog({
+
+      guild:
+        ban.guild,
+
+      title:
+        "🔨 Bannissement",
+
+      color:
+        0xED4245,
+
+      type:
+        "ban",
+
+      memberUser:
+        ban.user,
+
+      moderator:
+        executor ||
+        {
+          tag:
+            "Inconnu",
+
+          id:
+            "Inconnu"
+        },
+
+      reason
+    });
+  }
+);
+
+
+// ======================================================
+// DÉBAN DIRECTEMENT DEPUIS DISCORD
+// ======================================================
+
+client.on(
+  "guildBanRemove",
+  async ban => {
+
+    if (
+      consumeBotAction(
+        ban.guild.id,
+        ban.user.id,
+        "unban"
+      )
+    ) {
+      return;
+    }
+
+    removeTempBan(
+      ban.guild.id,
+      ban.user.id
+    );
+
+    let executor =
+      null;
+
+    let reason =
+      "Aucune raison fournie";
+
+    try {
+
+      const logs =
+        await ban.guild.fetchAuditLogs({
+
+          type:
+            AuditLogEvent.MemberBanRemove,
+
+          limit:
+            10
+        });
+
+      const entry =
+        logs.entries.find(
+          e =>
+
+            e.target?.id ===
+            ban.user.id &&
+
+            Date.now() -
+              e.createdTimestamp <
+              15000
+        );
+
+      if (entry) {
+
+        executor =
+          entry.executor;
+
+        reason =
+          entry.reason ||
+          reason;
+      }
+
+    } catch (error) {
+
+      console.error(
+        "Impossible de lire les logs d'audit (déban) :",
+        error
+      );
+    }
+
+    await sendModerationLog({
+
+      guild:
+        ban.guild,
+
+      title:
+        "🔓 Débannissement",
+
+      color:
+        0x57F287,
+
+      type:
+        "unban",
+
+      memberUser:
+        ban.user,
+
+      moderator:
+        executor ||
+        {
+          tag:
+            "Inconnu",
+
+          id:
+            "Inconnu"
+        },
+
+      reason
+    });
+  }
+);
+
+
+// ======================================================
+// MESSAGE SUPPRIMÉ
 // ======================================================
 
 client.on(
   "messageDelete",
-  async message => {
-    if (!message.guild) return;
+  message => {
 
-    if (message.author?.bot) return;
+    if (
+      !message.guild ||
+      message.author?.bot
+    ) {
+      return;
+    }
 
-    const channel =
-      getLogChannel(
-        message.guild,
-        LOG_CHANNEL_NAME
-      );
+    sendLog(
 
-    if (!channel) return;
+      message.guild,
 
-    const content =
-      message.content ||
-      "*Aucun contenu texte*";
+      "🗑️ Message supprimé",
 
-    const embed =
-      new EmbedBuilder()
-        .setTitle("🗑️ Message supprimé")
-        .addFields(
-          {
-            name: "👤 Auteur",
-            value:
-              message.author
-                ? `${message.author} \`${message.author.tag}\``
-                : "Inconnu"
-          },
-          {
-            name: "📍 Salon",
-            value:
-              `${message.channel}`
-          },
-          {
-            name: "💬 Contenu",
-            value:
-              content.slice(0, 1024)
-          }
-        )
-        .setColor(0xED4245)
-        .setTimestamp();
+      null,
 
-    channel.send({
-      embeds: [embed]
-    }).catch(() => {});
+      LOG_CHANNEL_NAME,
+
+      [
+
+        {
+          name:
+            "👤 Auteur",
+
+          value:
+            `${message.author?.tag || "Inconnu"} (\`${message.author?.id || "Inconnu"}\`)`,
+
+          inline:
+            false
+        },
+
+        {
+          name:
+            "📍 Salon",
+
+          value:
+            `${message.channel}`,
+
+          inline:
+            true
+        },
+
+        {
+          name:
+            "💬 Message",
+
+          value:
+            message.content ||
+            "Contenu indisponible",
+
+          inline:
+            false
+        }
+      ],
+
+      0xED4245
+    );
   }
 );
 
+
 // ======================================================
-// LOGS MESSAGES MODIFIÉS
+// MESSAGE MODIFIÉ
 // ======================================================
 
 client.on(
   "messageUpdate",
-  async (oldMessage, newMessage) => {
-    if (!oldMessage.guild) return;
+  (
+    oldMessage,
+    newMessage
+  ) => {
 
-    if (oldMessage.author?.bot) return;
+    if (
+      !newMessage.guild ||
+      newMessage.author?.bot
+    ) {
+      return;
+    }
 
     if (
       oldMessage.content ===
@@ -2246,308 +5040,79 @@ client.on(
       return;
     }
 
-    const channel =
-      getLogChannel(
-        oldMessage.guild,
-        LOG_CHANNEL_NAME
-      );
+    sendLog(
 
-    if (!channel) return;
+      newMessage.guild,
 
-    const oldContent =
-      oldMessage.content ||
-      "*Aucun contenu*";
+      "✏️ Message modifié",
 
-    const newContent =
-      newMessage.content ||
-      "*Aucun contenu*";
+      null,
 
-    const embed =
-      new EmbedBuilder()
-        .setTitle("✏️ Message modifié")
-        .addFields(
-          {
-            name: "👤 Auteur",
-            value:
-              oldMessage.author
-                ? `${oldMessage.author} \`${oldMessage.author.tag}\``
-                : "Inconnu"
-          },
-          {
-            name: "📍 Salon",
-            value:
-              `${oldMessage.channel}`
-          },
-          {
-            name: "📝 Avant",
-            value:
-              oldContent.slice(0, 1024)
-          },
-          {
-            name: "📝 Après",
-            value:
-              newContent.slice(0, 1024)
-          }
-        )
-        .setColor(0xFEE75C)
-        .setTimestamp();
+      LOG_CHANNEL_NAME,
 
-    channel.send({
-      embeds: [embed]
-    }).catch(() => {});
+      [
+
+        {
+          name:
+            "👤 Auteur",
+
+          value:
+            `${newMessage.author?.tag || "Inconnu"} (\`${newMessage.author?.id || "Inconnu"}\`)`,
+
+          inline:
+            false
+        },
+
+        {
+          name:
+            "📍 Salon",
+
+          value:
+            `${newMessage.channel}`,
+
+          inline:
+            true
+        },
+
+        {
+          name:
+            "📝 Avant",
+
+          value:
+            oldMessage.content ||
+            "Vide",
+
+          inline:
+            false
+        },
+
+        {
+          name:
+            "📝 Après",
+
+          value:
+            newMessage.content ||
+            "Vide",
+
+          inline:
+            false
+        }
+      ],
+
+      0xFEE75C
+    );
   }
 );
 
-// ======================================================
-// AUDIT LOG BAN
-// ======================================================
-
-client.on(
-  "guildBanAdd",
-  async ban => {
-    try {
-      const logs =
-        await ban.guild.fetchAuditLogs({
-          type: AuditLogEvent.MemberBanAdd,
-          limit: 10
-        });
-
-      const entry =
-        logs.entries.find(
-          e =>
-            e.target?.id === ban.user.id &&
-            Date.now() -
-              e.createdTimestamp <
-              10000
-        );
-
-      if (!entry) return;
-
-      const moderator =
-        entry.executor;
-
-      const reason =
-        entry.reason ||
-        "Aucune raison fournie";
-
-      // Évite de recréer une case si le ban vient
-      // déjà d'une commande de notre bot.
-      const recentExisting =
-        casesData.cases.find(
-          c =>
-            c.guildId === ban.guild.id &&
-            c.userId === ban.user.id &&
-            ["BAN", "TEMPBAN"].includes(
-              c.action
-            ) &&
-            Date.now() - c.createdAt <
-              10000
-        );
-
-      if (recentExisting) return;
-
-      const caseData =
-        createCase({
-          guild: ban.guild,
-          user: ban.user,
-          moderator,
-          action: "BAN",
-          reason
-        });
-
-      await sendModerationLog({
-        guild: ban.guild,
-        action: "BAN",
-        target: ban.user,
-        moderator,
-        reason,
-        caseData
-      });
-    } catch (error) {
-      console.error(
-        "Erreur audit ban :",
-        error
-      );
-    }
-  }
-);
 
 // ======================================================
-// AUDIT LOG UNBAN
-// ======================================================
-
-client.on(
-  "guildBanRemove",
-  async ban => {
-    try {
-      const logs =
-        await ban.guild.fetchAuditLogs({
-          type: AuditLogEvent.MemberBanRemove,
-          limit: 10
-        });
-
-      const entry =
-        logs.entries.find(
-          e =>
-            e.target?.id === ban.user.id &&
-            Date.now() -
-              e.createdTimestamp <
-              10000
-        );
-
-      if (!entry) return;
-
-      const moderator =
-        entry.executor;
-
-      const reason =
-        entry.reason ||
-        "Aucune raison fournie";
-
-      const recentExisting =
-        casesData.cases.find(
-          c =>
-            c.guildId === ban.guild.id &&
-            c.userId === ban.user.id &&
-            c.action === "UNBAN" &&
-            Date.now() - c.createdAt <
-              10000
-        );
-
-      if (recentExisting) return;
-
-      const caseData =
-        createCase({
-          guild: ban.guild,
-          user: ban.user,
-          moderator,
-          action: "UNBAN",
-          reason
-        });
-
-      await sendModerationLog({
-        guild: ban.guild,
-        action: "UNBAN",
-        target: ban.user,
-        moderator,
-        reason,
-        caseData
-      });
-    } catch (error) {
-      console.error(
-        "Erreur audit unban :",
-        error
-      );
-    }
-  }
-);
-
-// ======================================================
-// AUDIT LOG TIMEOUT
-// ======================================================
-
-client.on(
-  "guildMemberUpdate",
-  async (oldMember, newMember) => {
-    const oldTimeout =
-      oldMember.communicationDisabledUntilTimestamp;
-
-    const newTimeout =
-      newMember.communicationDisabledUntilTimestamp;
-
-    if (
-      oldTimeout === newTimeout
-    ) {
-      return;
-    }
-
-    // Timeout ajouté
-    if (
-      !oldTimeout &&
-      newTimeout
-    ) {
-      try {
-        const logs =
-          await newMember.guild.fetchAuditLogs({
-            type: AuditLogEvent.MemberUpdate,
-            limit: 10
-          });
-
-        const entry =
-          logs.entries.find(
-            e =>
-              e.target?.id === newMember.id &&
-              Date.now() -
-                e.createdTimestamp <
-                10000
-          );
-
-        if (!entry) return;
-
-        const moderator =
-          entry.executor;
-
-        const recentExisting =
-          casesData.cases.find(
-            c =>
-              c.guildId ===
-                newMember.guild.id &&
-              c.userId ===
-                newMember.id &&
-              c.action === "TIMEOUT" &&
-              Date.now() -
-                c.createdAt <
-                10000
-          );
-
-        if (recentExisting) return;
-
-        const duration =
-          newTimeout -
-          Date.now();
-
-        const reason =
-          entry.reason ||
-          "Aucune raison fournie";
-
-        const caseData =
-          createCase({
-            guild: newMember.guild,
-            user: newMember.user,
-            moderator,
-            action: "TIMEOUT",
-            reason,
-            duration,
-            expiresAt: newTimeout
-          });
-
-        await sendModerationLog({
-          guild: newMember.guild,
-          action: "TIMEOUT",
-          target: newMember,
-          moderator,
-          reason,
-          duration,
-          expiresAt: newTimeout,
-          caseData
-        });
-      } catch (error) {
-        console.error(
-          "Erreur audit timeout :",
-          error
-        );
-      }
-    }
-  }
-);
-
-// ======================================================
-// ERREURS CLIENT
+// ERREURS
 // ======================================================
 
 client.on(
   "error",
   error => {
+
     console.error(
       "Erreur Discord :",
       error
@@ -2555,24 +5120,11 @@ client.on(
   }
 );
 
-client.on(
-  "warn",
-  warning => {
-    console.warn(
-      "Discord warning :",
-      warning
-    );
-  }
-);
 
 // ======================================================
 // CONNEXION
 // ======================================================
 
-if (!TOKEN) {
-  console.error(
-    "❌ TOKEN manquant dans les variables d'environnement."
-  );
-} else {
-  client.login(TOKEN);
-}
+client.login(
+  process.env.DISCORD_TOKEN
+);
