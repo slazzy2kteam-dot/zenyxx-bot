@@ -30,17 +30,19 @@ const client = new Client({
 });
 
 const LOG_CHANNEL_NAME = "📋・logs";
+const TICKET_LOG_CHANNEL_NAME = "🚫-logs-tickets";
+const MODERATION_LOG_CHANNEL_NAME = "🚫-logs-moderation";
 
-function getLogChannel(guild) {
+function getLogChannel(guild, channelName = LOG_CHANNEL_NAME) {
   return guild.channels.cache.find(
     channel =>
-      channel.name === LOG_CHANNEL_NAME &&
+      channel.name === channelName &&
       channel.isTextBased()
   );
 }
 
-async function sendLog(guild, title, description) {
-  const channel = getLogChannel(guild);
+async function sendLog(guild, title, description, channelName = LOG_CHANNEL_NAME) {
+  const channel = getLogChannel(guild, channelName);
   if (!channel) return;
 
   const embed = new EmbedBuilder()
@@ -84,7 +86,7 @@ function getRolesForCategory(guild, category) {
 }
 
 function buildTicketPanel() {
-  // Bannière ZenyXx jointe depuis le dossier assets/ du projet
+  // Bannière ZenyXx jointe (fichier à la racine du projet)
   const banniere = new AttachmentBuilder("./zenyxx_banner.png");
 
   const embed = new EmbedBuilder()
@@ -186,7 +188,7 @@ client.on("interactionCreate", async interaction => {
 
       await targetMember.kick(raison);
       await interaction.reply(`👢 **${target.tag}** a été expulsé. Raison : ${raison}`);
-      sendLog(guild, "👢 Membre expulsé", `**${target.tag}** expulsé par **${member.user.tag}**\nRaison : ${raison}`);
+      sendLog(guild, "👢 Membre expulsé", `**${target.tag}** expulsé par **${member.user.tag}**\nRaison : ${raison}`, MODERATION_LOG_CHANNEL_NAME);
     }
 
     if (commandName === "ban") {
@@ -200,7 +202,7 @@ client.on("interactionCreate", async interaction => {
 
       await guild.members.ban(target.id, { reason: raison });
       await interaction.reply(`🔨 **${target.tag}** a été banni. Raison : ${raison}`);
-      sendLog(guild, "🔨 Membre banni", `**${target.tag}** banni par **${member.user.tag}**\nRaison : ${raison}`);
+      sendLog(guild, "🔨 Membre banni", `**${target.tag}** banni par **${member.user.tag}**\nRaison : ${raison}`, MODERATION_LOG_CHANNEL_NAME);
     }
 
     if (commandName === "clear") {
@@ -300,7 +302,7 @@ async function createTicketChannel(interaction, guild, categoryLike) {
 
   await interaction.editReply({ content: `✅ Ton ticket a été créé : ${ticketChannel}` });
 
-  sendLog(guild, "🎫 Ticket créé", `**${interaction.user.tag}** a ouvert un ticket : **${categoryLike.label}**\nSalon : ${ticketChannel}`);
+  sendLog(guild, "🎫 Ticket créé", `**${interaction.user.tag}** a ouvert un ticket : **${categoryLike.label}**\nSalon : ${ticketChannel}`, TICKET_LOG_CHANNEL_NAME);
 }
 
 // --- Menu déroulant de sélection de ticket ---
@@ -360,7 +362,7 @@ if (interaction.isStringSelectMenu() && interaction.customId === "candidature_su
   if (interaction.isButton() && interaction.customId === "close_ticket") {
     await interaction.reply({ content: "🔒 Ce ticket sera fermé dans 5 secondes..." });
 
-    sendLog(guild, "🔒 Ticket fermé", `Ticket **${interaction.channel.name}** fermé par **${member.user.tag}**`);
+    sendLog(guild, "🔒 Ticket fermé", `Ticket **${interaction.channel.name}** fermé par **${member.user.tag}**`, TICKET_LOG_CHANNEL_NAME);
 
     setTimeout(() => {
       interaction.channel.delete().catch(() => {});
@@ -421,7 +423,8 @@ client.on("guildBanAdd", ban => {
   sendLog(
     ban.guild,
     "🔨 Membre banni",
-    `**${ban.user.tag}** a été banni du serveur.`
+    `**${ban.user.tag}** a été banni du serveur.`,
+    MODERATION_LOG_CHANNEL_NAME
   );
 });
 
@@ -430,7 +433,8 @@ client.on("guildBanRemove", ban => {
   sendLog(
     ban.guild,
     "🔓 Membre débanni",
-    `**${ban.user.tag}** a été débanni du serveur.`
+    `**${ban.user.tag}** a été débanni du serveur.`,
+    MODERATION_LOG_CHANNEL_NAME
   );
 });
 
