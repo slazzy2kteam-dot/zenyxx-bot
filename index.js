@@ -33,8 +33,9 @@ const client = new Client({
 const LOG_CHANNEL_NAME = "📋・logs";
 const TICKET_LOG_CHANNEL_NAME = "🚫-logs-tickets";
 const MODERATION_LOG_CHANNEL_NAME = "🚫-logs-moderation";
-const WELCOME_CHANNEL_NAME = "🖐️・𝗯𝗶𝗲𝗻𝘃𝗲𝗻𝘂𝗲";
+const WELCOME_CHANNEL_NAME = "🖐️・𝗯𝗶𝗲𝗻𝘃𝗲𝗻𝘂𝗲"; // salon staff : infos détaillées (ID, compte créé...)
 const GOODBYE_CHANNEL_NAME = "✈️・𝗮𝘂𝗿𝗲𝘃𝗼𝗶𝗿";
+const PUBLIC_WELCOME_CHANNEL_NAME = "👋-bienvenue"; // salon public : message simple avec ping
 
 function getLogChannel(guild, channelName = LOG_CHANNEL_NAME) {
   return guild.channels.cache.find(
@@ -480,6 +481,14 @@ client.on("guildMemberAdd", member => {
       .setTimestamp();
 
     welcomeChannel.send({ content: `${member}`, embeds: [welcomeEmbed] }).catch(() => {});
+  }
+
+  // Message public simple, visible par tous les membres
+  const publicWelcomeChannel = getLogChannel(member.guild, PUBLIC_WELCOME_CHANNEL_NAME);
+  if (publicWelcomeChannel) {
+    publicWelcomeChannel.send(
+      `👋 Bienvenue ${member} sur **${member.guild.name}** ! On est ravis de t'avoir parmi nous 🎉`
+    ).catch(() => {});
   }
 });
 
