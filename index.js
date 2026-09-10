@@ -51,44 +51,26 @@ async function sendLog(guild, title, description) {
 }
 
 // ===== Configuration des tickets =====
-const ROLE_NAMES = {
-  admin: "Administrateur",
-  gestionnaire: "Gestionnaire",
-  moderateur: "Moderateur",
-  helper: "Helper"
-};
-
-// Chaque niveau donne acces aux niveaux en dessous de lui (cascade)
-const LEVEL_HIERARCHY = {
-  admin: ["admin"],
-  gestionnaire: ["admin", "gestionnaire"],
-  moderateur: ["admin", "gestionnaire", "moderateur"],
-  helper: ["admin", "gestionnaire", "moderateur", "helper"]
-};
-
+// Chaque categorie liste explicitement les roles qui doivent avoir acces
 const TICKET_CATEGORIES = [
-  { value: "administration", label: "Administration", emoji: "🛡️", level: "admin" },
-  { value: "aide_generale", label: "Aide générale", emoji: "❓", level: "helper" },
-  { value: "moderation_discord", label: "Modération Discord", emoji: "⚔️", level: "moderateur" },
-  { value: "moderation_twitch", label: "Modération Twitch", emoji: "🟣", level: "moderateur" },
-  { value: "moderation_youtube", label: "Modération YouTube", emoji: "🔴", level: "moderateur" },
-  { value: "animation", label: "Animation", emoji: "🎉", level: "gestionnaire" },
-  { value: "bug_technique", label: "Bug ou problème technique", emoji: "🛠️", level: "helper" },
-  { value: "candidature", label: "Candidature", emoji: "📋", level: "gestionnaire" },
-  { value: "abus_staff", label: "Signaler un abus d'un Staff", emoji: "🚨", level: "admin" },
-  { value: "autre", label: "Autre demande", emoji: "✏️", level: "helper" }
+  { value: "administration", label: "Administration", emoji: "🛡️", roles: ["Administrateur"] },
+  { value: "aide_generale", label: "Aide générale", emoji: "❓", roles: ["Administrateur", "Gestionnaire.Mods discord", "Moderateur Discord", "Helper"] },
+  { value: "moderation_discord", label: "Modération Discord", emoji: "⚔️", roles: ["Administrateur", "Gestionnaire.Mods discord", "Moderateur Discord"] },
+  { value: "moderation_twitch", label: "Modération Twitch", emoji: "🟣", roles: ["Administrateur", "Gestionnaire Twitch", "Moderateur Twitch"] },
+  { value: "moderation_youtube", label: "Modération YouTube", emoji: "🔴", roles: ["Administrateur", "Gestionnaire.Mods discord", "Moderateur Discord"] },
+  { value: "animation", label: "Animation", emoji: "🎉", roles: ["Administrateur", "Gestionnaire.Mods discord"] },
+  { value: "bug_technique", label: "Bug ou problème technique", emoji: "🛠️", roles: ["Administrateur", "Gestionnaire.Mods discord", "Moderateur Discord", "Helper"] },
+  { value: "candidature", label: "Candidature", emoji: "📋", roles: ["Administrateur", "Gestionnaire.Mods discord"] },
+  { value: "abus_staff", label: "Signaler un abus d'un Staff", emoji: "🚨", roles: ["Administrateur"] },
+  { value: "autre", label: "Autre demande", emoji: "✏️", roles: ["Administrateur", "Gestionnaire.Mods discord", "Moderateur Discord", "Helper"] }
 ];
 
-function getRolesForLevel(guild, level) {
-  const requiredLevels = LEVEL_HIERARCHY[level] || [];
+function getRolesForCategory(guild, category) {
   const roles = [];
-
-  for (const lvl of requiredLevels) {
-    const roleName = ROLE_NAMES[lvl];
+  for (const roleName of category.roles) {
     const role = guild.roles.cache.find(r => r.name === roleName);
     if (role) roles.push(role);
   }
-
   return roles;
 }
 
@@ -160,8 +142,10 @@ client.once("ready", async () => {
   console.log(`✅ ${client.user.tag} est connecté !`);
 
   try {
-    await client.application.commands.set(commands);
-    console.log("✅ Commandes slash enregistrées !");
+    for (const guild of client.guilds.cache.values()) {
+      await guild.commands.set(commands);
+    }
+    console.log("✅ Commandes slash enregistrées (par serveur, instantané) !");
   } catch (error) {
     console.error("Erreur lors de l'enregistrement des commandes :", error);
   }
@@ -245,7 +229,7 @@ client.on("interactionCreate", async interaction => {
       return interaction.editReply({ content: `Tu as déjà un ticket ouvert : ${existing}` });
     }
 
-    const staffRoles = getRolesForLevel(guild, category.level);
+    const staffRoles = getRolesForCategory(guild, category);
 
     const permissionOverwrites = [
       {
