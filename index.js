@@ -54,15 +54,15 @@ async function sendLog(guild, title, description) {
 // Chaque categorie liste explicitement les roles qui doivent avoir acces
 const TICKET_CATEGORIES = [
   { value: "administration", label: "Administration", emoji: "🛡️", roles: ["Administrateur"] },
-  { value: "aide_generale", label: "Aide générale", emoji: "❓", roles: ["Administrateur", "Gestionnaire.Mods discord", "Moderateur Discord", "Helper"] },
+  { value: "aide_generale", label: "Aide générale", emoji: "❓", roles: ["Administrateur", "Moderateur Discord", "Helper"] },
   { value: "moderation_discord", label: "Modération Discord", emoji: "⚔️", roles: ["Administrateur", "Gestionnaire.Mods discord", "Moderateur Discord"] },
   { value: "moderation_twitch", label: "Modération Twitch", emoji: "🟣", roles: ["Administrateur", "Gestionnaire Twitch", "Moderateur Twitch"] },
-  { value: "moderation_youtube", label: "Modération YouTube", emoji: "🔴", roles: ["Administrateur", "Gestionnaire.Mods discord", "Moderateur Discord"] },
-  { value: "animation", label: "Animation", emoji: "🎉", roles: ["Administrateur", "Gestionnaire.Mods discord"] },
-  { value: "bug_technique", label: "Bug ou problème technique", emoji: "🛠️", roles: ["Administrateur", "Gestionnaire.Mods discord", "Moderateur Discord", "Helper"] },
+  { value: "moderation_youtube", label: "Modération YouTube", emoji: "🔴", roles: ["Administrateur", "Moderateur YouTube"] },
+  { value: "animation", label: "Animation", emoji: "🎉", roles: ["Administrateur", "Moderateur Animation"] },
+  { value: "bug_technique", label: "Bug ou problème technique", emoji: "🛠️", roles: ["Administrateur"] },
   { value: "candidature", label: "Candidature", emoji: "📋", hasSubcategories: true },
   { value: "abus_staff", label: "Signaler un abus d'un Staff", emoji: "🚨", roles: ["Administrateur"] },
-  { value: "autre", label: "Autre demande", emoji: "✏️", roles: ["Administrateur", "Gestionnaire.Mods discord", "Moderateur Discord", "Helper"] }
+  { value: "autre", label: "Autre demande", emoji: "✏️", roles: ["Administrateur", "Moderateur Discord", "Helper"] }
 ];
 
 // Sous-categories utilisees uniquement quand hasSubcategories est vrai
@@ -282,7 +282,11 @@ async function createTicketChannel(interaction, guild, categoryLike) {
 
   const row = new ActionRowBuilder().addComponents(closeButton);
 
-  const mentionRoles = staffRoles.map(r => `<@&${r.id}>`).join(" ");
+  const mentionRoles = (
+    staffRoles.length > 1
+      ? staffRoles.filter(r => r.name !== "Administrateur")
+      : staffRoles
+  ).map(r => `<@&${r.id}>`).join(" ");
 
   await ticketChannel.send({
     content: `${interaction.user} ${mentionRoles}`,
