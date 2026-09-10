@@ -282,11 +282,10 @@ async function createTicketChannel(interaction, guild, categoryLike) {
 
   const row = new ActionRowBuilder().addComponents(closeButton);
 
-  const mentionRoles = (
-    staffRoles.length > 1
-      ? staffRoles.filter(r => r.name !== "Administrateur")
-      : staffRoles
-  ).map(r => `<@&${r.id}>`).join(" ");
+  const SILENT_ROLES = ["Administrateur", "Gestionnaire.Mods discord"];
+  const pingCandidates = staffRoles.filter(r => !SILENT_ROLES.includes(r.name));
+  const mentionRoles = (pingCandidates.length > 0 ? pingCandidates : staffRoles)
+    .map(r => `<@&${r.id}>`).join(" ");
 
   await ticketChannel.send({
     content: `${interaction.user} ${mentionRoles}`,
