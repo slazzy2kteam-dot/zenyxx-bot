@@ -60,9 +60,17 @@ const TICKET_CATEGORIES = [
   { value: "moderation_youtube", label: "Modération YouTube", emoji: "🔴", roles: ["Administrateur", "Gestionnaire.Mods discord", "Moderateur Discord"] },
   { value: "animation", label: "Animation", emoji: "🎉", roles: ["Administrateur", "Gestionnaire.Mods discord"] },
   { value: "bug_technique", label: "Bug ou problème technique", emoji: "🛠️", roles: ["Administrateur", "Gestionnaire.Mods discord", "Moderateur Discord", "Helper"] },
-  { value: "candidature", label: "Candidature", emoji: "📋", roles: ["Administrateur", "Gestionnaire.Mods discord"] },
+  { value: "candidature", label: "Candidature", emoji: "📋", hasSubcategories: true },
   { value: "abus_staff", label: "Signaler un abus d'un Staff", emoji: "🚨", roles: ["Administrateur"] },
   { value: "autre", label: "Autre demande", emoji: "✏️", roles: ["Administrateur", "Gestionnaire.Mods discord", "Moderateur Discord", "Helper"] }
+];
+
+// Sous-categories utilisees uniquement quand hasSubcategories est vrai
+const CANDIDATURE_SUBCATEGORIES = [
+  { value: "candidature_discord", label: "Staff Discord", emoji: "⚔️", description: "Modération / Staff sur le serveur Discord", roles: ["Administrateur", "Gestionnaire.Mods discord"] },
+  { value: "candidature_twitch", label: "Twitch", emoji: "🟣", description: "Modération pendant les lives Twitch", roles: ["Administrateur", "Gestionnaire Twitch"] },
+  { value: "candidature_youtube", label: "YouTube / TikTok", emoji: "🔴", description: "Modération YouTube / TikTok", roles: ["Administrateur"] },
+  { value: "candidature_animation", label: "Animation", emoji: "🎭", description: "Animateur sur le serveur", roles: ["Administrateur", "Gestionnaire.Mods discord"] }
 ];
 
 function getRolesForCategory(guild, category) {
@@ -214,86 +222,131 @@ client.on("interactionCreate", async interaction => {
     return;
   }
 
-  // --- Menu déroulant de sélection de ticket ---
-  if (interaction.isStringSelectMenu() && interaction.customId === "ticket_category_select") {
-    const categoryValue = interaction.values[0];
-    const category = TICKET_CATEGORIES.find(c => c.value === categoryValue);
-    if (!category) return;
-
-    await interaction.deferReply({ ephemeral: true });
-
-    const existing = guild.channels.cache.find(
-      c => c.name === `ticket-${category.value}-${interaction.user.username}`.toLowerCase()
-    );
-    if (existing) {
-      return interaction.editReply({ content: `Tu as déjà un ticket ouvert : ${existing}` });
-    }
-
-    const staffRoles = getRolesForCategory(guild, category);
-
-    const permissionOverwrites = [
-      {
-        id: guild.roles.everyone.id,
-        deny: [PermissionFlagsBits.ViewChannel]
-      },
-      {
-        id: interaction.user.id,
-        allow: [
-          PermissionFlagsBits.ViewChannel,
-          PermissionFlagsBits.SendMessages,
-          PermissionFlagsBits.ReadMessageHistory
-        ]
-      },
-      ...staffRoles.map(role => ({
-        id: role.id,
-        allow: [
-          PermissionFlagsBits.ViewChannel,
-          PermissionFlagsBits.SendMessages,
-          PermissionFlagsBits.ReadMessageHistory
-        ]
-      }))
-    ];
-
-    const ticketChannel = await guild.channels.create({
-      name: `ticket-${category.value}-${interaction.user.username}`.toLowerCase(),
-      type: ChannelType.GuildText,
-      permissionOverwrites
-    }).catch(() => null);
-
-    if (!ticketChannel) {
-      return interaction.editReply({ content: "❌ Impossible de créer le ticket. Vérifie mes permissions." });
-    }
-
-    const welcomeEmbed = new EmbedBuilder()
-      .setTitle(`${category.emoji} Ticket — ${category.label}`)
-      .setDescription(
-        `Bienvenue ${interaction.user}, ton ticket a été créé.\n\n` +
-        `Merci de décrire ta demande en détail. Un membre du staff va te répondre bientôt.`
-      )
-      .setColor(0x5865F2)
-      .setTimestamp();
-
-    const closeButton = new ButtonBuilder()
-      .setCustomId("close_ticket")
-      .setLabel("Fermer le ticket")
-      .setStyle(ButtonStyle.Danger)
-      .setEmoji("🔒");
-
-    const row = new ActionRowBuilder().addComponents(closeButton);
-
-    const mentionRoles = staffRoles.map(r => `<@&${r.id}>`).join(" ");
-
-    await ticketChannel.send({
-      content: `${interaction.user} ${mentionRoles}`,
-      embeds: [welcomeEmbed],
-      components: [row]
-    });
-
-    await interaction.editReply({ content: `✅ Ton ticket a été créé : ${ticketChannel}` });
-
-    sendLog(guild, "🎫 Ticket créé", `**${interaction.user.tag}** a ouvert un ticket : **${category.label}**\nSalon : ${ticketChannel}`);
-    return;
+async function createTicketChannel(interaction, guild, categoryLike) {
+  const existing = guild.channels.cache.find(
+    c => c.name === `ticket-${categoryLike.value}-${interaction.user.username}`.toLowerCase()
+  );
+  if (existing) {
+    return interaction.editReply({ content: `Tu as déjà un ticket ouvert : ${existing}` });
   }
+
+  const staffRoles = getRolesForCategory(guild, categoryLike);
+
+  const permissionOverwrites = [
+    {
+      id: guild.roles.everyone.id,
+      deny: [PermissionFlagsBits.ViewChannel]
+    },
+    {
+      id: interaction.user.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory
+      ]
+    },
+    ...staffRoles.map(role => ({
+      id: role.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory
+      ]
+    }))
+  ];
+
+  const ticketChannel = await guild.channels.create({
+    name: `ticket-${categoryLike.value}-${interaction.user.username}`.toLowerCase(),
+    type: ChannelType.GuildText,
+    permissionOverwrites
+  }).catch(() => null);
+
+  if (!ticketChannel) {
+    return interaction.editReply({ content: "❌ Impossible de créer le ticket. Vérifie mes permissions." });
+  }
+
+  const welcomeEmbed = new EmbedBuilder()
+    .setTitle(`${categoryLike.emoji} Ticket — ${categoryLike.label}`)
+    .setDescription(
+      `Bienvenue ${interaction.user}, ton ticket a été créé.\n\n` +
+      `Merci de décrire ta demande en détail. Un membre du staff va te répondre bientôt.`
+    )
+    .setColor(0x5865F2)
+    .setTimestamp();
+
+  const closeButton = new ButtonBuilder()
+    .setCustomId("close_ticket")
+    .setLabel("Fermer le ticket")
+    .setStyle(ButtonStyle.Danger)
+    .setEmoji("🔒");
+
+  const row = new ActionRowBuilder().addComponents(closeButton);
+
+  const mentionRoles = staffRoles.map(r => `<@&${r.id}>`).join(" ");
+
+  await ticketChannel.send({
+    content: `${interaction.user} ${mentionRoles}`,
+    embeds: [welcomeEmbed],
+    components: [row]
+  });
+
+  await interaction.editReply({ content: `✅ Ton ticket a été créé : ${ticketChannel}` });
+
+  sendLog(guild, "🎫 Ticket créé", `**${interaction.user.tag}** a ouvert un ticket : **${categoryLike.label}**\nSalon : ${ticketChannel}`);
+}
+
+// --- Menu déroulant de sélection de ticket ---
+if (interaction.isStringSelectMenu() && interaction.customId === "ticket_category_select") {
+  const categoryValue = interaction.values[0];
+  const category = TICKET_CATEGORIES.find(c => c.value === categoryValue);
+  if (!category) return;
+
+  if (category.hasSubcategories) {
+    const subEmbed = new EmbedBuilder()
+      .setTitle("📋 Candidature")
+      .setDescription(
+        "Pour quel secteur souhaitez-vous postuler ?\n\n" +
+        CANDIDATURE_SUBCATEGORIES.map(s => `${s.emoji} — **${s.label}**`).join("\n") +
+        "\n\nSélectionnez une option ci-dessous pour ouvrir votre ticket de candidature."
+      )
+      .setColor(0x5865F2);
+
+    const subMenu = new StringSelectMenuBuilder()
+      .setCustomId("candidature_subcategory_select")
+      .setPlaceholder("Sélectionnez le secteur visé")
+      .addOptions(
+        CANDIDATURE_SUBCATEGORIES.map(s => ({
+          label: s.label,
+          value: s.value,
+          emoji: s.emoji,
+          description: s.description
+        }))
+      );
+
+    const row = new ActionRowBuilder().addComponents(subMenu);
+
+    return interaction.reply({
+      embeds: [subEmbed],
+      components: [row],
+      ephemeral: true
+    });
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+  await createTicketChannel(interaction, guild, category);
+  return;
+}
+
+// --- Menu déroulant de sous-catégorie (Candidature) ---
+if (interaction.isStringSelectMenu() && interaction.customId === "candidature_subcategory_select") {
+  const subValue = interaction.values[0];
+  const subCategory = CANDIDATURE_SUBCATEGORIES.find(s => s.value === subValue);
+  if (!subCategory) return;
+
+  await interaction.deferReply({ ephemeral: true });
+  await createTicketChannel(interaction, guild, subCategory);
+  return;
+}
 
   // --- Bouton fermer le ticket ---
   if (interaction.isButton() && interaction.customId === "close_ticket") {
