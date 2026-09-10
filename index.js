@@ -33,6 +33,8 @@ const client = new Client({
 const LOG_CHANNEL_NAME = "📋・logs";
 const TICKET_LOG_CHANNEL_NAME = "🚫-logs-tickets";
 const MODERATION_LOG_CHANNEL_NAME = "🚫-logs-moderation";
+const WELCOME_CHANNEL_NAME = "🖐️・𝗯𝗶𝗲𝗻𝘃𝗲𝗻𝘂𝗲";
+const GOODBYE_CHANNEL_NAME = "✈️・𝗮𝘂𝗿𝗲𝘃𝗼𝗶𝗿";
 
 function getLogChannel(guild, channelName = LOG_CHANNEL_NAME) {
   return guild.channels.cache.find(
@@ -458,6 +460,18 @@ client.on("guildMemberAdd", member => {
     "👋 Membre arrivé",
     `**${member.user.tag}** vient de rejoindre le serveur.`
   );
+
+  const welcomeChannel = getLogChannel(member.guild, WELCOME_CHANNEL_NAME);
+  if (welcomeChannel) {
+    const welcomeEmbed = new EmbedBuilder()
+      .setTitle("🖐️ Bienvenue !")
+      .setDescription(`Bienvenue ${member} sur le serveur !\nNous sommes maintenant **${member.guild.memberCount}** membres.`)
+      .setThumbnail(member.user.displayAvatarURL())
+      .setColor(0x57F287)
+      .setTimestamp();
+
+    welcomeChannel.send({ content: `${member}`, embeds: [welcomeEmbed] }).catch(() => {});
+  }
 });
 
 // Membre quitte
@@ -467,6 +481,18 @@ client.on("guildMemberRemove", member => {
     "👋 Membre parti",
     `**${member.user.tag}** a quitté le serveur.`
   );
+
+  const goodbyeChannel = getLogChannel(member.guild, GOODBYE_CHANNEL_NAME);
+  if (goodbyeChannel) {
+    const goodbyeEmbed = new EmbedBuilder()
+      .setTitle("✈️ Au revoir !")
+      .setDescription(`**${member.user.tag}** vient de quitter le serveur.\nNous sommes maintenant **${member.guild.memberCount}** membres.`)
+      .setThumbnail(member.user.displayAvatarURL())
+      .setColor(0xED4245)
+      .setTimestamp();
+
+    goodbyeChannel.send({ embeds: [goodbyeEmbed] }).catch(() => {});
+  }
 });
 
 // Message supprimé
