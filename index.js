@@ -14,8 +14,6 @@ const {
   AuditLogEvent
 } = require("discord.js");
 
-const { createTranscript } = require("discord-html-transcripts");
-
 const express = require('express');
 const app = express();
 app.get('/', (req, res) => res.send('Bot en ligne !'));
@@ -56,6 +54,81 @@ async function sendLog(guild, title, description, channelName = LOG_CHANNEL_NAME
   if (fields.length) embed.addFields(fields);
 
   await channel.send({ embeds: [embed] }).catch(() => {});
+}
+
+// ===== Génération du transcript de ticket =====
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+async function generateTranscript(channel) {
+  let allMessages = [];
+  let lastId = null;
+
+  while (true) {
+    const options = { limit: 100 };
+    if (lastId) options.before = lastId;
+    const fetched = await channel.messages.fetch(options);
+    if (fetched.size === 0) break;
+    allMessages.push(...fetched.values());
+    lastId = fetched.last().id;
+    if (fetched.size < 100) break;
+  }
+
+  allMessages.reverse(); // du plus ancien au plus récent
+
+  const rows = allMessages.map(msg => {
+    const time = msg.createdAt.toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" });
+    const avatar = msg.author.displayAvatarURL({ extension: "png", size: 64 });
+    const name = escapeHtml(msg.author.tag);
+    const content = escapeHtml(msg.content || "").replace(/\n/g, "<br>");
+
+    const attachments = [...msg.attachments.values()].map(a =>
+      (a.contentType && a.contentType.startsWith("image/"))
+        ? `<img src="${a.url}" class="attachment-img">`
+        : `<a href="${a.url}" target="_blank">📎 ${escapeHtml(a.name)}</a>`
+    ).join("<br>");
+
+    return `
+      <div class="message">
+        <img class="avatar" src="${avatar}">
+        <div class="content">
+          <div class="meta"><span class="author">${name}</span><span class="time">${time}</span></div>
+          ${content ? `<div class="text">${content}</div>` : ""}
+          ${attachments ? `<div class="attachments">${attachments}</div>` : ""}
+        </div>
+      </div>`;
+  }).join("\n");
+
+  return `<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Transcript — ${escapeHtml(channel.name)}</title>
+<style>
+  body { background:#313338; color:#dbdee1; font-family: 'Segoe UI', Helvetica, Arial, sans-serif; margin:0; padding:24px; }
+  h1 { color:#fff; border-bottom: 2px solid #5865F2; padding-bottom:12px; margin-bottom:20px; }
+  .message { display:flex; gap:14px; padding:10px 12px; border-radius:8px; margin-bottom:4px; }
+  .message:hover { background:#2b2d31; }
+  .avatar { width:40px; height:40px; border-radius:50%; flex-shrink:0; }
+  .meta { margin-bottom:3px; }
+  .author { font-weight:600; color:#fff; }
+  .time { color:#949ba4; font-size:12px; margin-left:8px; }
+  .text { white-space:pre-wrap; line-height:1.45; word-break:break-word; }
+  .attachment-img { max-width:320px; border-radius:6px; margin-top:6px; display:block; }
+  .attachments a { color:#00a8fc; text-decoration:none; }
+  .attachments a:hover { text-decoration:underline; }
+</style>
+</head>
+<body>
+<h1>🎫 Transcript — ${escapeHtml(channel.name)}</h1>
+${rows || "<p>Aucun message dans ce ticket.</p>"}
+</body>
+</html>`;
 }
 
 // ===== Configuration des tickets =====
@@ -379,12 +452,9 @@ if (interaction.isStringSelectMenu() && interaction.customId === "candidature_su
 
     if (ticketLogChannel) {
       try {
-        const transcript = await createTranscript(interaction.channel, {
-          limit: -1,
-          returnType: "attachment",
-          filename: `transcript-${interaction.channel.name}.html`,
-          saveImages: true,
-          poweredBy: false
+        const html = await generateTranscript(interaction.channel);
+        const transcript = new AttachmentBuilder(Buffer.from(html, "utf-8"), {
+          name: `transcript-${interaction.channel.name}.html`
         });
 
         const closeEmbed = new EmbedBuilder()
