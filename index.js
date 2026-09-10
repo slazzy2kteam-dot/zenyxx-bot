@@ -14,6 +14,8 @@ const {
   AuditLogEvent
 } = require("discord.js");
 
+const { createCanvas, loadImage } = require("@napi-rs/canvas");
+
 const express = require('express');
 const app = express();
 app.get('/', (req, res) => res.send('Bot en ligne !'));
@@ -35,7 +37,7 @@ const TICKET_LOG_CHANNEL_NAME = "🚫-logs-tickets";
 const MODERATION_LOG_CHANNEL_NAME = "🚫-logs-moderation";
 const WELCOME_CHANNEL_NAME = "🖐️・𝗯𝗶𝗲𝗻𝘃𝗲𝗻𝘂𝗲"; // salon staff : infos détaillées (ID, compte créé...)
 const GOODBYE_CHANNEL_NAME = "✈️・𝗮𝘂𝗿𝗲𝘃𝗼𝗶𝗿";
-const PUBLIC_WELCOME_CHANNEL_NAME = "👋-bienvenue"; // salon public : message simple avec ping
+const PUBLIC_WELCOME_CHANNEL_NAME = "👋-bienvenue"; // salon public : message avec image de bienvenue
 
 function getLogChannel(guild, channelName = LOG_CHANNEL_NAME) {
   return guild.channels.cache.find(
@@ -57,6 +59,57 @@ async function sendLog(guild, title, description, channelName = LOG_CHANNEL_NAME
   if (fields.length) embed.addFields(fields);
 
   await channel.send({ embeds: [embed] }).catch(() => {});
+}
+
+// ===== Génération de l'image de bienvenue (avatar + texte) =====
+async function generateWelcomeImage(member) {
+  const width = 900;
+  const height = 300;
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext("2d");
+
+  // Fond sombre
+  ctx.fillStyle = "#23272a";
+  ctx.fillRect(0, 0, width, height);
+
+  // Bande d'accent à gauche
+  ctx.fillStyle = "#5865F2";
+  ctx.fillRect(0, 0, 8, height);
+
+  // Avatar rond
+  const avatarSize = 200;
+  const avatarX = 60;
+  const avatarY = (height - avatarSize) / 2;
+
+  const avatarURL = member.user.displayAvatarURL({ extension: "png", size: 256 });
+  const avatarImage = await loadImage(avatarURL);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(avatarX + avatarSize / 2, avatarY + avatarSize / 2, avatarSize / 2, 0, Math.PI * 2);
+  ctx.closePath();
+  ctx.clip();
+  ctx.drawImage(avatarImage, avatarX, avatarY, avatarSize, avatarSize);
+  ctx.restore();
+
+  // Texte
+  const textX = avatarX + avatarSize + 50;
+
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 60px sans-serif";
+  ctx.textBaseline = "top";
+  ctx.fillText("Bienvenue", textX, 70);
+
+  ctx.font = "28px sans-serif";
+  ctx.fillStyle = "#b9bbbe";
+  ctx.fillText("sur le serveur Discord", textX, 150);
+
+  ctx.font = "bold 34px sans-serif";
+  ctx.fillStyle = "#ffffff";
+  const pseudo = member.user.username;
+  ctx.fillText(pseudo, textX, 195);
+
+  return canvas.toBuffer("image/png");
 }
 
 // ===== Génération du transcript de ticket (texte simple) =====
@@ -483,12 +536,21 @@ client.on("guildMemberAdd", member => {
     welcomeChannel.send({ content: `${member}`, embeds: [welcomeEmbed] }).catch(() => {});
   }
 
-  // Message public simple, visible par tous les membres
+  // Message public avec image de bienvenue générée
   const publicWelcomeChannel = getLogChannel(member.guild, PUBLIC_WELCOME_CHANNEL_NAME);
   if (publicWelcomeChannel) {
-    publicWelcomeChannel.send(
-      `👋 Bienvenue ${member} sur **${member.guild.name}** ! On est ravis de t'avoir parmi nous 🎉`
-    ).catch(() => {});
+    generateWelcomeImage(member)
+      .then(buffer => {
+        const attachment = new AttachmentBuilder(buffer, { name: "bienvenue.png" });
+        publicWelcomeChannel.send({
+          content: `👋 Bienvenue ${member} !`,
+          files: [attachment]
+        });
+      })
+      .catch(err => {
+        console.error("Erreur génération image bienvenue :", err);
+        publicWelcomeChannel.send(`👋 Bienvenue ${member} sur **${member.guild.name}** !`).catch(() => {});
+      });
   }
 });
 
