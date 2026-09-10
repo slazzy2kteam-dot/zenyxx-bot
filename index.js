@@ -85,7 +85,7 @@ function getRolesForCategory(guild, category) {
 
 function buildTicketPanel() {
   // Bannière ZenyXx jointe depuis le dossier assets/ du projet
-  const banniere = new AttachmentBuilder("./assets/zenyxx_banner.png");
+  const banniere = new AttachmentBuilder("./zenyxx_banner.png");
 
   const embed = new EmbedBuilder()
     .setTitle("🎫 Support — Ouvrir un ticket")
