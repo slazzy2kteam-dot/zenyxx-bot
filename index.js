@@ -10,7 +10,8 @@ const {
   ButtonBuilder,
   ButtonStyle,
   ChannelType,
-  AttachmentBuilder
+  AttachmentBuilder,
+  AuditLogEvent
 } = require("discord.js");
 
 const express = require('express');
@@ -41,14 +42,16 @@ function getLogChannel(guild, channelName = LOG_CHANNEL_NAME) {
   );
 }
 
-async function sendLog(guild, title, description, channelName = LOG_CHANNEL_NAME) {
+async function sendLog(guild, title, description, channelName = LOG_CHANNEL_NAME, fields = []) {
   const channel = getLogChannel(guild, channelName);
   if (!channel) return;
 
   const embed = new EmbedBuilder()
     .setTitle(title)
-    .setDescription(description)
     .setTimestamp();
+
+  if (description) embed.setDescription(description);
+  if (fields.length) embed.addFields(fields);
 
   await channel.send({ embeds: [embed] }).catch(() => {});
 }
@@ -188,7 +191,11 @@ client.on("interactionCreate", async interaction => {
 
       await targetMember.kick(raison);
       await interaction.reply(`👢 **${target.tag}** a été expulsé. Raison : ${raison}`);
-      sendLog(guild, "👢 Membre expulsé", `**${target.tag}** expulsé par **${member.user.tag}**\nRaison : ${raison}`, MODERATION_LOG_CHANNEL_NAME);
+      sendLog(guild, "👢 Membre expulsé", null, MODERATION_LOG_CHANNEL_NAME, [
+        { name: "Sanctionné", value: `${target.tag} (${target.id})`, inline: true },
+        { name: "Modérateur", value: `${member.user.tag}`, inline: true },
+        { name: "Raison", value: raison, inline: false }
+      ]);
     }
 
     if (commandName === "ban") {
@@ -202,7 +209,11 @@ client.on("interactionCreate", async interaction => {
 
       await guild.members.ban(target.id, { reason: raison });
       await interaction.reply(`🔨 **${target.tag}** a été banni. Raison : ${raison}`);
-      sendLog(guild, "🔨 Membre banni", `**${target.tag}** banni par **${member.user.tag}**\nRaison : ${raison}`, MODERATION_LOG_CHANNEL_NAME);
+      sendLog(guild, "🔨 Membre banni", null, MODERATION_LOG_CHANNEL_NAME, [
+        { name: "Sanctionné", value: `${target.tag} (${target.id})`, inline: true },
+        { name: "Modérateur", value: `${member.user.tag}`, inline: true },
+        { name: "Raison", value: raison, inline: false }
+      ]);
     }
 
     if (commandName === "clear") {
@@ -419,23 +430,46 @@ client.on("messageUpdate", (oldMessage, newMessage) => {
 });
 
 // Ban (via l'interface Discord directement)
-client.on("guildBanAdd", ban => {
-  sendLog(
-    ban.guild,
-    "🔨 Membre banni",
-    `**${ban.user.tag}** a été banni du serveur.`,
-    MODERATION_LOG_CHANNEL_NAME
-  );
+client.on("guildBanAdd", async ban => {
+  let executorTag = "Inconnu (banni hors du bot)";
+  let raison = ban.reason || "Aucune raison fournie";
+
+  try {
+    const logs = await ban.guild.fetchAuditLogs({ type: AuditLogEvent.MemberBanAdd, limit: 5 });
+    const entry = logs.entries.find(e => e.target?.id === ban.user.id);
+    if (entry) {
+      executorTag = entry.executor?.tag || executorTag;
+      raison = entry.reason || raison;
+    }
+  } catch (error) {
+    console.error("Impossible de lire les logs d'audit (ban) :", error);
+  }
+
+  sendLog(ban.guild, "🔨 Membre banni", null, MODERATION_LOG_CHANNEL_NAME, [
+    { name: "Sanctionné", value: `${ban.user.tag} (${ban.user.id})`, inline: true },
+    { name: "Modérateur", value: executorTag, inline: true },
+    { name: "Raison", value: raison, inline: false }
+  ]);
 });
 
 // Déban
-client.on("guildBanRemove", ban => {
-  sendLog(
-    ban.guild,
-    "🔓 Membre débanni",
-    `**${ban.user.tag}** a été débanni du serveur.`,
-    MODERATION_LOG_CHANNEL_NAME
-  );
+client.on("guildBanRemove", async ban => {
+  let executorTag = "Inconnu (débanni hors du bot)";
+
+  try {
+    const logs = await ban.guild.fetchAuditLogs({ type: AuditLogEvent.MemberBanRemove, limit: 5 });
+    const entry = logs.entries.find(e => e.target?.id === ban.user.id);
+    if (entry) {
+      executorTag = entry.executor?.tag || executorTag;
+    }
+  } catch (error) {
+    console.error("Impossible de lire les logs d'audit (déban) :", error);
+  }
+
+  sendLog(ban.guild, "🔓 Membre débanni", null, MODERATION_LOG_CHANNEL_NAME, [
+    { name: "Débanni", value: `${ban.user.tag} (${ban.user.id})`, inline: true },
+    { name: "Modérateur", value: executorTag, inline: true }
+  ]);
 });
 
 // Erreurs
