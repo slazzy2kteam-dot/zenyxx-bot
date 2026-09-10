@@ -4086,33 +4086,6 @@ client.on(
   "guildMemberAdd",
   member => {
 
-    sendLog(
-
-      member.guild,
-
-      "👋 Membre arrivé",
-
-      null,
-
-      LOG_CHANNEL_NAME,
-
-      [
-
-        {
-          name:
-            "👤 Membre",
-
-          value:
-            `${member.user.tag} (\`${member.user.id}\`)`,
-
-          inline:
-            false
-        }
-      ],
-
-      0x57F287
-    );
-
     const welcomeChannel =
       getLogChannel(
         member.guild,
@@ -4376,34 +4349,6 @@ client.on(
 
       return;
     }
-
-    await sendLog(
-
-      member.guild,
-
-      "👋 Membre parti",
-
-      null,
-
-      LOG_CHANNEL_NAME,
-
-      [
-
-        {
-          name:
-            "👤 Membre",
-
-          value:
-            `${member.user.tag} (\`${member.user.id}\`)`,
-
-          inline:
-            false
-        }
-      ],
-
-      0xED4245
-    );
-
 
     const goodbyeChannel =
       getLogChannel(
