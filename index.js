@@ -102,12 +102,12 @@ const MAX_EMBED_FIELD = 1024;
 // SYSTÈME DE VOCALES PRIVÉES
 // ======================================================
 
-// Noms exacts des salons "hub" qui déclenchent la création
+// IDs des salons "hub" qui déclenchent la création
+// 🔉 • Créer ta vocal duo → 2 places
+// 🔉 • Créer ta vocal trio → 3 places
 const VOCAL_HUBS = {
-  "créer ta vocal duo": 2,
-  "creer ta vocal duo": 2,
-  "créer ta vocal trio": 3,
-  "creer ta vocal trio": 3
+  "1547964402118959214": 2,
+  "1547943285010472991": 3
 };
 
 // Stockage en mémoire : channelId -> { ownerId, hubType, locked, hidden, blockedUsers, panelMessageId }
@@ -293,8 +293,7 @@ function buildVoiceControlPanel(channel, owner) {
 
 async function createPrivateVoiceChannel(member, hubChannel) {
   const guild = member.guild;
-  const hubName = hubChannel.name.toLowerCase();
-  const hubType = VOCAL_HUBS[hubName] || 2;
+  const hubType = VOCAL_HUBS[hubChannel.id] || 2;
 
   // Trouver la catégorie du hub
   const category = hubChannel.parent;
@@ -5839,10 +5838,7 @@ client.on(
       newState.channel &&
       !oldState.channel
     ) {
-      const hubName =
-        newState.channel.name.toLowerCase();
-
-      if (VOCAL_HUBS[hubName]) {
+      if (VOCAL_HUBS[newState.channel.id]) {
         await createPrivateVoiceChannel(
           newState.member,
           newState.channel
@@ -5918,10 +5914,7 @@ client.on(
       }
 
       // Nouveau salon = hub ?
-      const hubName =
-        newState.channel.name.toLowerCase();
-
-      if (VOCAL_HUBS[hubName]) {
+      if (VOCAL_HUBS[newState.channel.id]) {
         await createPrivateVoiceChannel(
           newState.member,
           newState.channel
