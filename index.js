@@ -1748,55 +1748,6 @@ async function createTicketChannel(
     content:
       `✅ Ton ticket a été créé : ${ticketChannel}`
   });
-
-  await sendLog(
-
-    guild,
-
-    "🎫 Ticket créé",
-
-    null,
-
-    TICKET_LOG_CHANNEL_NAME,
-
-    [
-
-      {
-        name:
-          "👤 Membre",
-
-        value:
-          `${interaction.user.tag} (\`${interaction.user.id}\`)`,
-
-        inline:
-          false
-      },
-
-      {
-        name:
-          "📋 Type",
-
-        value:
-          categoryLike.label,
-
-        inline:
-          true
-      },
-
-      {
-        name:
-          "📍 Salon",
-
-        value:
-          `${ticketChannel}`,
-
-        inline:
-          true
-      }
-    ],
-
-    0x5865F2
-  );
 }
 
 
