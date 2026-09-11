@@ -12,7 +12,8 @@ const {
   ButtonStyle,
   ChannelType,
   AttachmentBuilder,
-  AuditLogEvent
+  AuditLogEvent,
+  MessageType
 } = require("discord.js");
 
 const { createCanvas, loadImage } = require("@napi-rs/canvas");
@@ -86,6 +87,7 @@ const MODERATION_LOG_CHANNEL_NAME = "🚫-logs-moderation";
 const WELCOME_CHANNEL_NAME = "🔨-arrivé-des-membres";
 const GOODBYE_CHANNEL_NAME = "✈️・𝗮𝘂𝗿𝗲𝘃𝗼𝗶𝗿";
 const PUBLIC_WELCOME_CHANNEL_NAME = "👋-bienvenue";
+const BOOST_CHANNEL_NAME = "🚀・boost";
 
 const CASE_FILE = "./cases.json";
 
@@ -5972,6 +5974,111 @@ client.on(
       ],
 
       0xED4245
+    );
+  }
+);
+
+
+// ======================================================
+// BOOST DU SERVEUR
+// ======================================================
+
+client.on(
+  "messageCreate",
+  async message => {
+
+    if (
+      !message.guild
+    ) {
+      return;
+    }
+
+    const boostTypes = [
+
+      MessageType.UserPremiumGuildSubscription,
+      MessageType.UserPremiumGuildSubscriptionTier1,
+      MessageType.UserPremiumGuildSubscriptionTier2,
+      MessageType.UserPremiumGuildSubscriptionTier3
+    ];
+
+    if (
+      !boostTypes.includes(
+        message.type
+      )
+    ) {
+      return;
+    }
+
+    const boostChannel =
+      getLogChannel(
+        message.guild,
+        BOOST_CHANNEL_NAME
+      );
+
+    if (!boostChannel) {
+      return;
+    }
+
+    // Discord inclut le nombre de boosts dans le texte du message
+    // système (ex: "a boosté le serveur 2 fois !"). On le récupère si présent.
+    const countMatch =
+      message.content.match(
+        /(\d+)/
+      );
+
+    const count =
+      countMatch
+        ? Number(
+            countMatch[1]
+          )
+        : 1;
+
+    const embed =
+      new EmbedBuilder()
+
+        .setTitle(
+          "🚀 Boost du serveur !"
+        )
+
+        .setDescription(
+
+          count > 1
+
+            ? `${message.author} a boosté le serveur **${count} fois** !\n\nMerci pour ton boost, toute l'équipe de la **𝒁𝒆𝒏𝒚𝑿𝒙 Team** te remercie chaleureusement 💜`
+
+            : `${message.author} a boosté le serveur !\n\nMerci pour ton boost, toute l'équipe de la **𝒁𝒆𝒏𝒚𝑿𝒙 Team** te remercie chaleureusement 💜`
+        )
+
+        .setThumbnail(
+          message.author.displayAvatarURL({
+            extension:
+              "png",
+
+            size:
+              256
+          })
+        )
+
+        .setColor(
+          0xF47FFF
+        )
+
+        .setFooter({
+
+          text:
+            `${message.guild.name} • Boost`,
+
+          iconURL:
+            message.guild.iconURL()
+        })
+
+        .setTimestamp();
+
+    await boostChannel.send({
+      embeds:
+        [embed]
+    }).catch(
+      () => {}
     );
   }
 );
