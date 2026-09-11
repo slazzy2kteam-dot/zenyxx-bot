@@ -2,6 +2,7 @@ const {
   Client,
   GatewayIntentBits,
   Partials,
+  Options,
   EmbedBuilder,
   SlashCommandBuilder,
   PermissionFlagsBits,
@@ -47,7 +48,32 @@ const client = new Client({
   partials: [
     Partials.Message,
     Partials.Channel
-  ]
+  ],
+
+  // Garde beaucoup plus de messages en mémoire par salon
+  // (200 par défaut → 5000), pour que les logs de suppression
+  // affichent l'auteur et le contenu même sur des salons très actifs.
+  makeCache:
+    Options.cacheWithLimits({
+      ...Options.DefaultMakeCacheSettings,
+
+      MessageManager:
+        5000
+    }),
+
+  // Empêche Discord.js de "nettoyer" les vieux messages du cache
+  // trop rapidement (garde les messages jusqu'à 24h avant de les retirer).
+  sweepers: {
+    ...Options.DefaultSweeperSettings,
+
+    messages: {
+      interval:
+        3600,
+
+      lifetime:
+        86400
+    }
+  }
 });
 
 // ======================================================
