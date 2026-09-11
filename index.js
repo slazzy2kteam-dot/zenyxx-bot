@@ -4633,6 +4633,157 @@ client.on(
     newMember
   ) => {
 
+    // ================================================
+    // RÔLES AJOUTÉS / RETIRÉS
+    // ================================================
+
+    const addedRoles =
+      newMember.roles.cache.filter(
+        r =>
+          !oldMember.roles.cache.has(
+            r.id
+          )
+      );
+
+    const removedRoles =
+      oldMember.roles.cache.filter(
+        r =>
+          !newMember.roles.cache.has(
+            r.id
+          )
+      );
+
+    if (
+      addedRoles.size ||
+      removedRoles.size
+    ) {
+
+      let roleExecutor =
+        null;
+
+      try {
+
+        const logs =
+          await newMember.guild.fetchAuditLogs({
+
+            type:
+              AuditLogEvent.MemberRoleUpdate,
+
+            limit:
+              5
+          });
+
+        const entry =
+          logs.entries.find(
+            e =>
+
+              e.target?.id ===
+                newMember.user.id &&
+
+              Date.now() -
+                e.createdTimestamp <
+                15000
+          );
+
+        if (entry) {
+
+          roleExecutor =
+            entry.executor;
+        }
+
+      } catch (error) {
+
+        console.error(
+          "Impossible de lire les logs d'audit (rôles) :",
+          error
+        );
+      }
+
+      const roleFields = [
+
+        {
+          name:
+            "👤 Membre",
+
+          value:
+            `${newMember}`,
+
+          inline:
+            false
+        }
+      ];
+
+      if (addedRoles.size) {
+
+        roleFields.push({
+
+          name:
+            "✅ Rôle(s) ajouté(s)",
+
+          value:
+            addedRoles
+              .map(
+                r =>
+                  `${r}`
+              )
+              .join(", "),
+
+          inline:
+            false
+        });
+      }
+
+      if (removedRoles.size) {
+
+        roleFields.push({
+
+          name:
+            "❌ Rôle(s) retiré(s)",
+
+          value:
+            removedRoles
+              .map(
+                r =>
+                  `${r}`
+              )
+              .join(", "),
+
+          inline:
+            false
+        });
+      }
+
+      roleFields.push({
+
+        name:
+          "🛡️ Effectué par",
+
+        value:
+          roleExecutor
+            ? `${roleExecutor}`
+            : "Automatique / inconnu",
+
+        inline:
+          false
+      });
+
+      await sendLog(
+
+        newMember.guild,
+
+        "🎭 Rôle(s) modifié(s)",
+
+        null,
+
+        LOG_CHANNEL_NAME,
+
+        roleFields,
+
+        0x5865F2
+      );
+    }
+
+
     const oldTimeout =
       oldMember.communicationDisabledUntilTimestamp ||
       null;
@@ -5403,6 +5554,386 @@ client.on(
       ],
 
       0xFEE75C
+    );
+  }
+);
+
+
+// ======================================================
+// SALON CRÉÉ
+// ======================================================
+
+client.on(
+  "channelCreate",
+  async channel => {
+
+    if (
+      !channel.guild
+    ) {
+      return;
+    }
+
+    let executor =
+      null;
+
+    try {
+
+      const logs =
+        await channel.guild.fetchAuditLogs({
+
+          type:
+            AuditLogEvent.ChannelCreate,
+
+          limit:
+            5
+        });
+
+      const entry =
+        logs.entries.find(
+          e =>
+
+            e.target?.id ===
+              channel.id &&
+
+            Date.now() -
+              e.createdTimestamp <
+              15000
+        );
+
+      if (entry) {
+
+        executor =
+          entry.executor;
+      }
+
+    } catch (error) {
+
+      console.error(
+        "Impossible de lire les logs d'audit (salon créé) :",
+        error
+      );
+    }
+
+    await sendLog(
+
+      channel.guild,
+
+      "📁 Salon créé",
+
+      null,
+
+      LOG_CHANNEL_NAME,
+
+      [
+
+        {
+          name:
+            "📍 Salon",
+
+          value:
+            `${channel} (\`${channel.name}\`)`,
+
+          inline:
+            false
+        },
+
+        {
+          name:
+            "🛡️ Créé par",
+
+          value:
+            executor
+              ? `${executor}`
+              : "Inconnu",
+
+          inline:
+            false
+        }
+      ],
+
+      0x57F287
+    );
+  }
+);
+
+
+// ======================================================
+// SALON SUPPRIMÉ
+// ======================================================
+
+client.on(
+  "channelDelete",
+  async channel => {
+
+    if (
+      !channel.guild
+    ) {
+      return;
+    }
+
+    let executor =
+      null;
+
+    try {
+
+      const logs =
+        await channel.guild.fetchAuditLogs({
+
+          type:
+            AuditLogEvent.ChannelDelete,
+
+          limit:
+            5
+        });
+
+      const entry =
+        logs.entries.find(
+          e =>
+
+            e.target?.id ===
+              channel.id &&
+
+            Date.now() -
+              e.createdTimestamp <
+              15000
+        );
+
+      if (entry) {
+
+        executor =
+          entry.executor;
+      }
+
+    } catch (error) {
+
+      console.error(
+        "Impossible de lire les logs d'audit (salon supprimé) :",
+        error
+      );
+    }
+
+    await sendLog(
+
+      channel.guild,
+
+      "🗑️ Salon supprimé",
+
+      null,
+
+      LOG_CHANNEL_NAME,
+
+      [
+
+        {
+          name:
+            "📍 Salon",
+
+          value:
+            `\`${channel.name}\``,
+
+          inline:
+            false
+        },
+
+        {
+          name:
+            "🛡️ Supprimé par",
+
+          value:
+            executor
+              ? `${executor}`
+              : "Inconnu",
+
+          inline:
+            false
+        }
+      ],
+
+      0xED4245
+    );
+  }
+);
+
+
+// ======================================================
+// RÔLE CRÉÉ
+// ======================================================
+
+client.on(
+  "roleCreate",
+  async role => {
+
+    let executor =
+      null;
+
+    try {
+
+      const logs =
+        await role.guild.fetchAuditLogs({
+
+          type:
+            AuditLogEvent.RoleCreate,
+
+          limit:
+            5
+        });
+
+      const entry =
+        logs.entries.find(
+          e =>
+
+            e.target?.id ===
+              role.id &&
+
+            Date.now() -
+              e.createdTimestamp <
+              15000
+        );
+
+      if (entry) {
+
+        executor =
+          entry.executor;
+      }
+
+    } catch (error) {
+
+      console.error(
+        "Impossible de lire les logs d'audit (rôle créé) :",
+        error
+      );
+    }
+
+    await sendLog(
+
+      role.guild,
+
+      "🎭 Rôle créé",
+
+      null,
+
+      LOG_CHANNEL_NAME,
+
+      [
+
+        {
+          name:
+            "🏷️ Rôle",
+
+          value:
+            `${role}`,
+
+          inline:
+            false
+        },
+
+        {
+          name:
+            "🛡️ Créé par",
+
+          value:
+            executor
+              ? `${executor}`
+              : "Inconnu",
+
+          inline:
+            false
+        }
+      ],
+
+      0x57F287
+    );
+  }
+);
+
+
+// ======================================================
+// RÔLE SUPPRIMÉ
+// ======================================================
+
+client.on(
+  "roleDelete",
+  async role => {
+
+    let executor =
+      null;
+
+    try {
+
+      const logs =
+        await role.guild.fetchAuditLogs({
+
+          type:
+            AuditLogEvent.RoleDelete,
+
+          limit:
+            5
+        });
+
+      const entry =
+        logs.entries.find(
+          e =>
+
+            e.target?.id ===
+              role.id &&
+
+            Date.now() -
+              e.createdTimestamp <
+              15000
+        );
+
+      if (entry) {
+
+        executor =
+          entry.executor;
+      }
+
+    } catch (error) {
+
+      console.error(
+        "Impossible de lire les logs d'audit (rôle supprimé) :",
+        error
+      );
+    }
+
+    await sendLog(
+
+      role.guild,
+
+      "🗑️ Rôle supprimé",
+
+      null,
+
+      LOG_CHANNEL_NAME,
+
+      [
+
+        {
+          name:
+            "🏷️ Rôle",
+
+          value:
+            `\`${role.name}\``,
+
+          inline:
+            false
+        },
+
+        {
+          name:
+            "🛡️ Supprimé par",
+
+          value:
+            executor
+              ? `${executor}`
+              : "Inconnu",
+
+          inline:
+            false
+        }
+      ],
+
+      0xED4245
     );
   }
 );
