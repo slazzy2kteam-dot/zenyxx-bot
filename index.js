@@ -4541,6 +4541,44 @@ client.on(
       return;
     }
 
+    await sendLog(
+
+      member.guild,
+
+      "👋 Membre parti",
+
+      `**${member.user.tag}** a quitté le serveur.`,
+
+      LOG_CHANNEL_NAME,
+
+      [
+
+        {
+          name:
+            "👤 Pseudo",
+
+          value:
+            member.user.tag,
+
+          inline:
+            true
+        },
+
+        {
+          name:
+            "🆔 ID",
+
+          value:
+            `\`${member.user.id}\``,
+
+          inline:
+            true
+        }
+      ],
+
+      0xED4245
+    );
+
     const goodbyeChannel =
       getLogChannel(
         member.guild,
