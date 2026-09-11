@@ -164,36 +164,25 @@ function buildVoiceControlPanel(channel, owner) {
     .setColor(0x5865F2)
     .addFields(
       {
-        name: "Salon",
-        value: `🔊 ${channel.name}`,
+        name: "Salon :",
+        value: `🔊 👥 • ${channel.name}`,
         inline: true
       },
       {
-        name: "Propriétaire",
+        name: "Propriétaire :",
         value: `<@${owner.id}>`,
-        inline: true
-      },
-      {
-        name: "Limite",
-        value: `${limit} membre${limit > 1 ? "s" : ""}`,
         inline: true
       }
     )
     .setDescription(
-      "Utilise les boutons ci-dessous pour gérer ton salon vocal.\n\n" +
-      "📝 **Renommer** — Change le nom du salon\n" +
-      "👥 **Limite** — Modifie le nombre de places\n" +
-      "🔊 **Qualité** — Change la qualité audio\n" +
-      "🔒 **Verrouiller** — Rend le salon privé (personne ne peut rejoindre)\n" +
-      "🔓 **Déverrouiller** — Rend le salon public\n" +
-      "👁️ **Masquer** — Cache le salon aux autres\n" +
-      "👁️‍🗨️ **Afficher** — Rend le salon visible\n" +
-      "🚫 **Exclure** — Exclut un membre du salon\n" +
-      "⛔ **Bloquer** — Bloque un membre définitivement\n" +
-      "✅ **Autoriser** — Autorise un membre bloqué à revenir\n" +
-      "➕ **Ajouter** — Ajoute un membre à ton salon\n" +
-      "👑 **Réclamer** — Devient propriétaire si le salon est sans owner\n" +
-      "🔄 **Transférer** — Transfère la propriété à un autre membre"
+      "Utilise les boutons ci-dessous pour gérer ton salon vocal.\n" +
+      "✏️ **Renommer** Change le nom du salon\n" +
+      "👥 **Limite** Définit le nombre max de membres\n" +
+      "🔒 **Verrouiller** Empêche les autres de rejoindre\n" +
+      "👁️ **Masquer** Cache le salon\n" +
+      "👑 **Propriétaire** Transfère le salon\n" +
+      "🚫 **Exclure** Kick / bloque un membre.\n\n" +
+      "Seul le propriétaire du salon peut utiliser ces contrôles."
     );
 
   const row1 = new ActionRowBuilder().addComponents(
@@ -201,17 +190,17 @@ function buildVoiceControlPanel(channel, owner) {
       .setCustomId("vc_rename")
       .setLabel("Renommer")
       .setStyle(ButtonStyle.Secondary)
-      .setEmoji("📝"),
+      .setEmoji("✏️"),
     new ButtonBuilder()
       .setCustomId("vc_limit")
       .setLabel("Limite")
       .setStyle(ButtonStyle.Secondary)
-      .setEmoji("👥"),
+      .setEmoji("👤"),
     new ButtonBuilder()
       .setCustomId("vc_quality")
       .setLabel("Qualité")
       .setStyle(ButtonStyle.Secondary)
-      .setEmoji("🔊")
+      .setEmoji("🎚️")
   );
 
   const row2 = new ActionRowBuilder().addComponents(
@@ -240,7 +229,7 @@ function buildVoiceControlPanel(channel, owner) {
       .setCustomId("vc_show")
       .setLabel("Afficher")
       .setStyle(ButtonStyle.Secondary)
-      .setEmoji("👁️‍🗨️")
+      .setEmoji("🕶️")
       .setDisabled(!isHidden)
   );
 
@@ -249,12 +238,12 @@ function buildVoiceControlPanel(channel, owner) {
       .setCustomId("vc_kick")
       .setLabel("Exclure")
       .setStyle(ButtonStyle.Danger)
-      .setEmoji("🚫"),
+      .setEmoji("🔨"),
     new ButtonBuilder()
       .setCustomId("vc_block")
       .setLabel("Bloquer")
       .setStyle(ButtonStyle.Danger)
-      .setEmoji("⛔"),
+      .setEmoji("🚫"),
     new ButtonBuilder()
       .setCustomId("vc_allow")
       .setLabel("Autoriser")
@@ -264,11 +253,6 @@ function buildVoiceControlPanel(channel, owner) {
 
   const row5 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId("vc_add")
-      .setLabel("Ajouter")
-      .setStyle(ButtonStyle.Primary)
-      .setEmoji("➕"),
-    new ButtonBuilder()
       .setCustomId("vc_claim")
       .setLabel("Réclamer")
       .setStyle(ButtonStyle.Primary)
@@ -277,7 +261,7 @@ function buildVoiceControlPanel(channel, owner) {
       .setCustomId("vc_transfer")
       .setLabel("Transférer")
       .setStyle(ButtonStyle.Primary)
-      .setEmoji("🔄")
+      .setEmoji("🎁")
   );
 
   return {
@@ -361,47 +345,14 @@ async function createPrivateVoiceChannel(member, hubChannel) {
   privateVoiceChannels.set(newChannel.id, channelInfo);
   saveVocalData();
 
-  // Créer un salon texte associé pour le panel
-  const textChannel = await guild.channels.create({
-    name: `panel-${channelName.toLowerCase().replace(/[^a-z0-9-_]/g, "-")}`,
-    type: ChannelType.GuildText,
-    parent: category,
-    topic: `panel-vocal:${newChannel.id}`,
-    permissionOverwrites: [
-      {
-        id: guild.roles.everyone.id,
-        deny: [PermissionFlagsBits.ViewChannel]
-      },
-      {
-        id: member.id,
-        allow: [
-          PermissionFlagsBits.ViewChannel,
-          PermissionFlagsBits.SendMessages,
-          PermissionFlagsBits.ReadMessageHistory
-        ]
-      },
-      {
-        id: client.user.id,
-        allow: [
-          PermissionFlagsBits.ViewChannel,
-          PermissionFlagsBits.SendMessages,
-          PermissionFlagsBits.ReadMessageHistory,
-          PermissionFlagsBits.ManageMessages
-        ]
-      }
-    ]
-  }).catch(() => null);
+  // Envoyer le panel dans le chat intégré de la vocale
+  const panel = buildVoiceControlPanel(newChannel, member.user);
+  const panelMsg = await newChannel.send(panel).catch(() => null);
 
-  if (textChannel) {
-    const panel = buildVoiceControlPanel(newChannel, member.user);
-    const panelMsg = await textChannel.send(panel).catch(() => null);
-
-    if (panelMsg) {
-      channelInfo.panelMessageId = panelMsg.id;
-      channelInfo.panelChannelId = textChannel.id;
-      privateVoiceChannels.set(newChannel.id, channelInfo);
-      saveVocalData();
-    }
+  if (panelMsg) {
+    channelInfo.panelMessageId = panelMsg.id;
+    privateVoiceChannels.set(newChannel.id, channelInfo);
+    saveVocalData();
   }
 
   return newChannel;
@@ -414,16 +365,12 @@ async function createPrivateVoiceChannel(member, hubChannel) {
 
 async function updateVoicePanel(voiceChannel) {
   const info = privateVoiceChannels.get(voiceChannel.id);
-  if (!info || !info.panelMessageId || !info.panelChannelId) return;
+  if (!info || !info.panelMessageId) return;
 
-  const guild = voiceChannel.guild;
-  const textChannel = guild.channels.cache.get(info.panelChannelId);
-  if (!textChannel) return;
-
-  const panelMsg = await textChannel.messages.fetch(info.panelMessageId).catch(() => null);
+  const panelMsg = await voiceChannel.messages.fetch(info.panelMessageId).catch(() => null);
   if (!panelMsg) return;
 
-  const owner = await guild.members.fetch(info.ownerId).catch(() => null);
+  const owner = await voiceChannel.guild.members.fetch(info.ownerId).catch(() => null);
   const panel = buildVoiceControlPanel(voiceChannel, owner?.user || { id: info.ownerId });
 
   await panelMsg.edit(panel).catch(() => {});
@@ -435,18 +382,11 @@ async function updateVoicePanel(voiceChannel) {
 // ======================================================
 
 async function deletePrivateVoiceChannel(voiceChannel) {
-  const info = privateVoiceChannels.get(voiceChannel.id);
-
-  // Supprimer le salon texte du panel si existant
-  if (info?.panelChannelId) {
-    const textChannel = voiceChannel.guild.channels.cache.get(info.panelChannelId);
-    if (textChannel) {
-      await textChannel.delete().catch(() => {});
-    }
-  }
-
   privateVoiceChannels.delete(voiceChannel.id);
   saveVocalData();
+
+  // Supprimer le salon vocal lui-même
+  await voiceChannel.delete().catch(() => {});
 }
 
 
@@ -4649,32 +4589,18 @@ client.on(
 
       const customId = interaction.customId;
 
-      // Trouver le salon vocal associé via le topic du salon texte
-      const topicMatch =
-        interaction.channel.topic?.match(
-          /panel-vocal:(\d+)/
-        );
-      const voiceChannelId =
-        topicMatch?.[1];
+      // Le panel est dans le chat de la vocale, donc interaction.channel = le salon vocal
+      const voiceChannel = interaction.channel;
+      const voiceChannelId = voiceChannel.id;
 
-      if (!voiceChannelId) {
-        await interaction.reply({
-          content:
-            "❌ Impossible de trouver le salon vocal associé.",
-          ephemeral: true
-        });
-        return;
-      }
-
-      const voiceChannel =
-        interaction.guild.channels.cache.get(
+      if (
+        !privateVoiceChannels.has(
           voiceChannelId
-        );
-
-      if (!voiceChannel) {
+        )
+      ) {
         await interaction.reply({
           content:
-            "❌ Le salon vocal n'existe plus.",
+            "❌ Ce salon n'est pas une vocale privée.",
           ephemeral: true
         });
         return;
@@ -5166,48 +5092,6 @@ client.on(
 
 
       // ================================================
-      // AJOUTER — Ouvre un modal
-      // ================================================
-      if (customId === "vc_add") {
-        const modal =
-          new ModalBuilder()
-            .setCustomId(
-              "vc_add_modal"
-            )
-            .setTitle(
-              "➕ Ajouter un membre"
-            );
-
-        const memberInput =
-          new TextInputBuilder()
-            .setCustomId(
-              "vc_add_input"
-            )
-            .setLabel(
-              "ID du membre à ajouter"
-            )
-            .setStyle(
-              TextInputStyle.Short
-            )
-            .setPlaceholder(
-              "123456789012345678"
-            )
-            .setRequired(true);
-
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(
-            memberInput
-          )
-        );
-
-        await interaction.showModal(
-          modal
-        );
-        return;
-      }
-
-
-      // ================================================
       // RÉCLAMER — Devient propriétaire
       // ================================================
       if (customId === "vc_claim") {
@@ -5259,13 +5143,16 @@ client.on(
           );
         }
 
-        // Mettre à jour le salon texte
-        await interaction.channel.permissionOverwrites.edit(
+        // Mettre à jour les permissions du vocal pour le nouveau propriétaire
+        await voiceChannel.permissionOverwrites.edit(
           interaction.user.id,
           {
             ViewChannel: true,
-            SendMessages: true,
-            ReadMessageHistory: true
+            Connect: true,
+            Speak: true,
+            Stream: true,
+            UseVAD: true,
+            ManageChannels: true
           }
         );
 
@@ -5345,31 +5232,18 @@ client.on(
       const customId =
         interaction.customId;
 
-      const topicMatch =
-        interaction.channel.topic?.match(
-          /panel-vocal:(\d+)/
-        );
-      const voiceChannelId =
-        topicMatch?.[1];
+      // Le panel est dans le chat de la vocale
+      const voiceChannel = interaction.channel;
+      const voiceChannelId = voiceChannel.id;
 
-      if (!voiceChannelId) {
-        await interaction.reply({
-          content:
-            "❌ Impossible de trouver le salon vocal associé.",
-          ephemeral: true
-        });
-        return;
-      }
-
-      const voiceChannel =
-        interaction.guild.channels.cache.get(
+      if (
+        !privateVoiceChannels.has(
           voiceChannelId
-        );
-
-      if (!voiceChannel) {
+        )
+      ) {
         await interaction.reply({
           content:
-            "❌ Le salon vocal n'existe plus.",
+            "❌ Ce salon n'est pas une vocale privée.",
           ephemeral: true
         });
         return;
@@ -5467,61 +5341,6 @@ client.on(
 
 
       // ================================================
-      // MODAL AJOUTER
-      // ================================================
-      if (
-        customId === "vc_add_modal"
-      ) {
-        const memberId =
-          interaction.fields.getTextInputValue(
-            "vc_add_input"
-          );
-
-        const member =
-          await interaction.guild.members
-            .fetch(memberId)
-            .catch(
-              () => null
-            );
-
-        if (!member) {
-          await interaction.reply({
-            content:
-              "❌ Membre introuvable. Vérifie l'ID.",
-            ephemeral: true
-          });
-          return;
-        }
-
-        // Autoriser le membre à voir et rejoindre
-        await voiceChannel.permissionOverwrites.edit(
-          member.id,
-          {
-            ViewChannel: true,
-            Connect: true
-          }
-        );
-
-        // Autoriser dans le salon texte aussi
-        await interaction.channel.permissionOverwrites.edit(
-          member.id,
-          {
-            ViewChannel: true,
-            SendMessages: true,
-            ReadMessageHistory: true
-          }
-        );
-
-        await interaction.reply({
-          content:
-            `➕ <@${member.id}> a été ajouté au salon !`,
-          ephemeral: true
-        });
-        return;
-      }
-
-
-      // ================================================
       // MODAL TRANSFÉRER
       // ================================================
       if (
@@ -5570,13 +5389,16 @@ client.on(
           }
         );
 
-        // Mettre à jour le salon texte
-        await interaction.channel.permissionOverwrites.edit(
+        // Mettre à jour les permissions du vocal pour le nouveau propriétaire
+        await voiceChannel.permissionOverwrites.edit(
           newOwner.id,
           {
             ViewChannel: true,
-            SendMessages: true,
-            ReadMessageHistory: true
+            Connect: true,
+            Speak: true,
+            Stream: true,
+            UseVAD: true,
+            ManageChannels: true
           }
         );
 
@@ -5617,31 +5439,18 @@ client.on(
       const selectedValue =
         interaction.values[0];
 
-      const topicMatch =
-        interaction.channel.topic?.match(
-          /panel-vocal:(\d+)/
-        );
-      const voiceChannelId =
-        topicMatch?.[1];
+      // Le panel est dans le chat de la vocale
+      const voiceChannel = interaction.channel;
+      const voiceChannelId = voiceChannel.id;
 
-      if (!voiceChannelId) {
-        await interaction.reply({
-          content:
-            "❌ Impossible de trouver le salon vocal associé.",
-          ephemeral: true
-        });
-        return;
-      }
-
-      const voiceChannel =
-        interaction.guild.channels.cache.get(
+      if (
+        !privateVoiceChannels.has(
           voiceChannelId
-        );
-
-      if (!voiceChannel) {
+        )
+      ) {
         await interaction.reply({
           content:
-            "❌ Le salon vocal n'existe plus.",
+            "❌ Ce salon n'est pas une vocale privée.",
           ephemeral: true
         });
         return;
