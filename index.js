@@ -5072,6 +5072,20 @@ client.on(
       return;
     }
 
+    // Ignore les salons privés (staff) : seuls les salons publics sont logués
+    const isPublicChannel =
+      message.channel
+        .permissionsFor(
+          message.guild.roles.everyone
+        )
+        ?.has(
+          PermissionFlagsBits.ViewChannel
+        );
+
+    if (!isPublicChannel) {
+      return;
+    }
+
     const channel =
       getLogChannel(
         message.guild,
