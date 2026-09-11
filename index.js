@@ -3700,54 +3700,98 @@ client.on(
             true
         });
 
-        await sendLog(
+        const clearEmbed =
+          new EmbedBuilder()
 
-          guild,
+            .setAuthor({
 
-          "🧹 Messages supprimés",
-
-          null,
-
-          MODERATION_LOG_CHANNEL_NAME,
-
-          [
-
-            {
               name:
-                "🛡️ Modérateur",
+                member.user.tag,
 
-              value:
-                `${member.user.tag} (\`${member.user.id}\`)`,
+              iconURL:
+                member.user.displayAvatarURL()
+            })
 
-              inline:
-                false
-            },
+            .setTitle(
+              "🧹 Messages supprimés"
+            )
 
-            {
-              name:
-                "📍 Salon",
+            .addFields(
 
-              value:
-                `${interaction.channel}`,
+              {
+                name:
+                  "🛡️ Modérateur",
 
-              inline:
-                true
-            },
+                value:
+                  `${member.user}`,
 
-            {
-              name:
-                "🔢 Nombre",
+                inline:
+                  true
+              },
 
-              value:
-                `${deleted.size}`,
+              {
+                name:
+                  "📍 Salon",
 
-              inline:
-                true
-            }
-          ],
+                value:
+                  `${interaction.channel}`,
 
-          0x5865F2
-        );
+                inline:
+                  true
+              },
+
+              {
+                name:
+                  "🔢 Nombre",
+
+                value:
+                  `${deleted.size}`,
+
+                inline:
+                  true
+              }
+            )
+
+            .setThumbnail(
+              member.user.displayAvatarURL({
+                extension:
+                  "png",
+
+                size:
+                  256
+              })
+            )
+
+            .setColor(
+              0x5865F2
+            )
+
+            .setFooter({
+
+              text:
+                `${guild.name} • Support & Logs`,
+
+              iconURL:
+                guild.iconURL()
+            })
+
+            .setTimestamp();
+
+        const clearLogChannel =
+          getLogChannel(
+            guild,
+            MODERATION_LOG_CHANNEL_NAME
+          );
+
+        if (clearLogChannel) {
+
+          await clearLogChannel.send({
+            embeds:
+              [clearEmbed]
+          }).catch(
+            () => {}
+          );
+        }
 
         return;
       }
@@ -5019,7 +5063,7 @@ client.on(
 
 client.on(
   "messageDelete",
-  message => {
+  async message => {
 
     if (
       !message.guild ||
@@ -5028,54 +5072,207 @@ client.on(
       return;
     }
 
-    sendLog(
+    const channel =
+      getLogChannel(
+        message.guild,
+        LOG_CHANNEL_NAME
+      );
 
-      message.guild,
+    if (!channel) {
+      return;
+    }
 
-      "🗑️ Message supprimé",
+    // Vérifie si un modérateur a supprimé ce message (via les logs d'audit)
+    let executor =
+      null;
 
-      null,
+    try {
 
-      LOG_CHANNEL_NAME,
+      const logs =
+        await message.guild.fetchAuditLogs({
 
-      [
+          type:
+            AuditLogEvent.MessageDelete,
 
-        {
+          limit:
+            5
+        });
+
+      const entry =
+        logs.entries.find(
+          e =>
+
+            e.target?.id ===
+              message.author?.id &&
+
+            e.extra?.channel?.id ===
+              message.channel.id &&
+
+            Date.now() -
+              e.createdTimestamp <
+              15000
+        );
+
+      if (entry) {
+
+        executor =
+          entry.executor;
+      }
+
+    } catch (error) {
+
+      console.error(
+        "Impossible de lire les logs d'audit (message supprimé) :",
+        error
+      );
+    }
+
+    const attachmentsText =
+      message.attachments?.size
+        ? [...message.attachments.values()]
+            .map(a => a.name)
+            .join(", ")
+        : null;
+
+    const embed =
+      new EmbedBuilder()
+
+        .setAuthor({
+
           name:
-            "👤 Auteur",
+            message.author?.tag ||
+            "Utilisateur inconnu",
 
-          value:
-            `${message.author?.tag || "Inconnu"} (\`${message.author?.id || "Inconnu"}\`)`,
+          iconURL:
+            message.author?.displayAvatarURL()
+        })
 
-          inline:
-            false
-        },
+        .setTitle(
+          "🗑️ Message supprimé"
+        )
 
-        {
-          name:
-            "📍 Salon",
+        .addFields(
 
-          value:
-            `${message.channel}`,
+          {
+            name:
+              "👤 Auteur",
 
-          inline:
-            true
-        },
+            value:
+              message.author
+                ? `${message.author}`
+                : "Utilisateur inconnu",
 
-        {
-          name:
-            "💬 Message",
+            inline:
+              true
+          },
 
-          value:
-            message.content ||
-            "Contenu indisponible",
+          {
+            name:
+              "📍 Salon",
 
-          inline:
-            false
-        }
-      ],
+            value:
+              `${message.channel}`,
 
-      0xED4245
+            inline:
+              true
+          },
+
+          {
+            name:
+              "🆔 ID du message",
+
+            value:
+              `\`${message.id}\``,
+
+            inline:
+              true
+          }
+        );
+
+    if (
+      executor &&
+      executor.id !==
+        message.author?.id
+    ) {
+
+      embed.addFields({
+
+        name:
+          "🛡️ Supprimé par",
+
+        value:
+          `${executor}`,
+
+        inline:
+          true
+      });
+    }
+
+    embed.addFields({
+
+      name:
+        "💬 Contenu",
+
+      value:
+        cleanText(
+          message.content,
+          "Contenu indisponible"
+        ),
+
+      inline:
+        false
+    });
+
+    if (attachmentsText) {
+
+      embed.addFields({
+
+        name:
+          "📎 Pièce(s) jointe(s)",
+
+        value:
+          cleanText(
+            attachmentsText
+          ),
+
+        inline:
+          false
+      });
+    }
+
+    embed
+
+      .setThumbnail(
+        message.author?.displayAvatarURL({
+          extension:
+            "png",
+
+          size:
+            256
+        }) ??
+        null
+      )
+
+      .setColor(
+        0xED4245
+      )
+
+      .setFooter({
+
+        text:
+          `${message.guild.name} • Support & Logs`,
+
+        iconURL:
+          message.guild.iconURL()
+      })
+
+      .setTimestamp();
+
+    channel.send({
+      embeds:
+        [embed]
+    }).catch(
+      () => {}
     );
   }
 );
