@@ -283,7 +283,7 @@ async function createPrivateVoiceChannel(member, hubChannel) {
   const category = hubChannel.parent;
 
   // Créer le nom du salon
-  const typeLabel = hubType === 2 ? "Duo" : "Trio";
+  const typeLabel = hubType === 2 ? "👥・Duo" : "👥・Trio";
   const channelName = `${typeLabel} de ${member.user.username}`;
 
   // Permissions : privé par défaut
@@ -347,7 +347,7 @@ async function createPrivateVoiceChannel(member, hubChannel) {
 
   // Envoyer le panel dans le chat intégré de la vocale
   const panel = buildVoiceControlPanel(newChannel, member.user);
-  const panelMsg = await newChannel.send(panel).catch(() => null);
+  const panelMsg = await newChannel.send({ content: `<@${member.user.id}>`, ...panel }).catch(() => null);
 
   if (panelMsg) {
     channelInfo.panelMessageId = panelMsg.id;
