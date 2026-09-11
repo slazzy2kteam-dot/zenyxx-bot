@@ -1055,6 +1055,25 @@ async function generateTranscript(
 
   allMessages.reverse();
 
+  const participantIds =
+    new Set();
+
+  for (
+    const msg
+    of allMessages
+  ) {
+
+    if (
+      msg.author &&
+      !msg.author.bot
+    ) {
+
+      participantIds.add(
+        msg.author.id
+      );
+    }
+  }
+
   const lines =
     allMessages.map(
       msg => {
@@ -1155,15 +1174,20 @@ async function generateTranscript(
       }
     );
 
-  return (
+  const text =
     `Transcript du ticket : ${channel.name}\n` +
     `${"=".repeat(50)}\n\n` +
     (
       lines.length
         ? lines.join("\n\n")
         : "Aucun message dans ce ticket."
-    )
-  );
+    );
+
+  return {
+    text,
+    participantIds:
+      [...participantIds]
+  };
 }
 
 
@@ -1621,6 +1645,9 @@ async function createTicketChannel(
 
       type:
         ChannelType.GuildText,
+
+      topic:
+        `ticket-creator:${interaction.user.id}`,
 
       permissionOverwrites
     })
@@ -3981,7 +4008,33 @@ client.on(
 
         try {
 
-          const transcriptText =
+          // Récupère le créateur du ticket (stocké dans le topic du salon)
+          const topicMatch =
+            interaction.channel.topic?.match(
+              /ticket-creator:(\d+)/
+            );
+
+          const creatorId =
+            topicMatch?.[1] ??
+            null;
+
+          const creator =
+            creatorId
+              ? await client.users
+                  .fetch(
+                    creatorId
+                  )
+                  .catch(
+                    () => null
+                  )
+              : null;
+
+          const {
+            text:
+              transcriptText,
+
+            participantIds
+          } =
             await generateTranscript(
               interaction.channel
             );
@@ -4000,43 +4053,144 @@ client.on(
               }
             );
 
+          const allParticipantIds =
+            [
+              ...new Set(
+                [
+                  ...(creatorId ? [creatorId] : []),
+                  ...participantIds
+                ]
+              )
+            ];
+
+          const participantsText =
+            allParticipantIds.length
+              ? allParticipantIds
+                  .map(
+                    id =>
+                      `<@${id}>`
+                  )
+                  .join(", ")
+              : "Aucun";
+
           const closeEmbed =
             new EmbedBuilder()
 
               .setTitle(
-                "🔒 Ticket fermé"
+                "🎟️ Ticket fermé"
               )
 
               .setDescription(
-                `Ticket **${interaction.channel.name}** fermé par **${member.user.tag}**`
+                `Un ticket a été fermé par **${member.user.tag}**. Vous pouvez consulter le transcript ci-dessous :`
               )
 
-              .addFields({
+              .addFields(
 
-                name:
-                  "🛡️ Modérateur",
+                {
+                  name:
+                    "👤 Membre",
 
-                value:
-                  `${member.user.tag} (\`${member.user.id}\`)`,
+                  value:
+                    creator
+                      ? `${creator}`
+                      : "Utilisateur inconnu",
 
-                inline:
-                  false
-              })
+                  inline:
+                    false
+                },
+
+                {
+                  name:
+                    "🆔 ID du ticket",
+
+                  value:
+                    interaction.channel.name,
+
+                  inline:
+                    false
+                },
+
+                {
+                  name:
+                    "👥 Participants",
+
+                  value:
+                    cleanText(
+                      participantsText
+                    ),
+
+                  inline:
+                    false
+                }
+              )
+
+              .setThumbnail(
+
+                (
+                  creator ||
+                  member.user
+                ).displayAvatarURL({
+                  extension:
+                    "png",
+
+                  size:
+                    256
+                })
+              )
 
               .setColor(
-                0xED4245
+                0x5865F2
               )
+
+              .setFooter({
+
+                text:
+                  `${guild.name} • Support & Logs`,
+
+                iconURL:
+                  guild.iconURL()
+              })
 
               .setTimestamp();
 
-          await ticketLogChannel.send({
+          const sentMessage =
+            await ticketLogChannel.send({
 
-            embeds:
-              [closeEmbed],
+              embeds:
+                [closeEmbed],
 
-            files:
-              [transcript]
-          });
+              files:
+                [transcript]
+            });
+
+          const transcriptURL =
+            sentMessage.attachments
+              .first()
+              ?.url;
+
+          if (
+            transcriptURL
+          ) {
+
+            closeEmbed.addFields({
+
+              name:
+                "📄 Transcript",
+
+              value:
+                `[Voir le transcript](${transcriptURL})`,
+
+              inline:
+                false
+            });
+
+            await sentMessage.edit({
+              embeds:
+                [closeEmbed]
+            }).catch(
+              () => {}
+            );
+          }
 
         } catch (error) {
 
@@ -4049,11 +4203,27 @@ client.on(
 
             guild,
 
-            "🔒 Ticket fermé",
+            "🎟️ Ticket fermé",
 
-            `Ticket **${interaction.channel.name}** fermé par **${member.user.tag}**\n⚠️ Transcript non généré.`,
+            `Un ticket a été fermé par **${member.user.tag}**.\n⚠️ Transcript non généré.`,
 
-            TICKET_LOG_CHANNEL_NAME
+            TICKET_LOG_CHANNEL_NAME,
+
+            [
+
+              {
+                name:
+                  "🆔 ID du ticket",
+
+                value:
+                  interaction.channel.name,
+
+                inline:
+                  false
+              }
+            ],
+
+            0x5865F2
           );
         }
       }
