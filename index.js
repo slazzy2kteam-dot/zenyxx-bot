@@ -13,7 +13,11 @@ const {
   ChannelType,
   AttachmentBuilder,
   AuditLogEvent,
-  MessageType
+  MessageType,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  VoiceBasedChannel
 } = require("discord.js");
 
 const { createCanvas, loadImage } = require("@napi-rs/canvas");
@@ -44,7 +48,8 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildModeration
+    GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildVoiceStates
   ],
   partials: [
     Partials.Message,
@@ -93,9 +98,368 @@ const CASE_FILE = "./cases.json";
 
 const MAX_EMBED_FIELD = 1024;
 
+// ======================================================
+// SYSTÈME DE VOCALES PRIVÉES
+// ======================================================
+
+// Noms exacts des salons "hub" qui déclenchent la création
+const VOCAL_HUBS = {
+  "créer ta vocal duo": 2,
+  "creer ta vocal duo": 2,
+  "créer ta vocal trio": 3,
+  "creer ta vocal trio": 3
+};
+
+// Stockage en mémoire : channelId -> { ownerId, hubType, locked, hidden, blockedUsers, panelMessageId }
+const privateVoiceChannels = new Map();
+
+// Fichier de sauvegarde pour les vocales privées
+const VOCAL_FILE = "./private_vocals.json";
+
+function loadVocalData() {
+  try {
+    if (!fs.existsSync(VOCAL_FILE)) {
+      return {};
+    }
+    return JSON.parse(fs.readFileSync(VOCAL_FILE, "utf8"));
+  } catch (error) {
+    console.error("Erreur lecture private_vocals.json :", error);
+    return {};
+  }
+}
+
+function saveVocalData() {
+  try {
+    const data = {};
+    for (const [channelId, info] of privateVoiceChannels.entries()) {
+      data[channelId] = info;
+    }
+    fs.writeFileSync(VOCAL_FILE, JSON.stringify(data, null, 2));
+  } catch (error) {
+    console.error("Erreur écriture private_vocals.json :", error);
+  }
+}
+
+function restoreVocalData() {
+  const data = loadVocalData();
+  for (const [channelId, info] of Object.entries(data)) {
+    privateVoiceChannels.set(channelId, info);
+  }
+}
+
 
 // ======================================================
-// ACTIONS DU BOT
+// PANEL DE CONTRÔLE VOCAL
+// ======================================================
+
+function buildVoiceControlPanel(channel, owner) {
+  const info = privateVoiceChannels.get(channel.id);
+  const isLocked = info?.locked || false;
+  const isHidden = info?.hidden || false;
+  const hubType = info?.hubType || 2;
+  const limit = channel.userLimit || hubType;
+
+  const embed = new EmbedBuilder()
+    .setTitle("🔊 Panneau de contrôle du salon")
+    .setColor(0x5865F2)
+    .addFields(
+      {
+        name: "Salon",
+        value: `🔊 ${channel.name}`,
+        inline: true
+      },
+      {
+        name: "Propriétaire",
+        value: `<@${owner.id}>`,
+        inline: true
+      },
+      {
+        name: "Limite",
+        value: `${limit} membre${limit > 1 ? "s" : ""}`,
+        inline: true
+      }
+    )
+    .setDescription(
+      "Utilise les boutons ci-dessous pour gérer ton salon vocal.\n\n" +
+      "📝 **Renommer** — Change le nom du salon\n" +
+      "👥 **Limite** — Modifie le nombre de places\n" +
+      "🔊 **Qualité** — Change la qualité audio\n" +
+      "🔒 **Verrouiller** — Rend le salon privé (personne ne peut rejoindre)\n" +
+      "🔓 **Déverrouiller** — Rend le salon public\n" +
+      "👁️ **Masquer** — Cache le salon aux autres\n" +
+      "👁️‍🗨️ **Afficher** — Rend le salon visible\n" +
+      "🚫 **Exclure** — Exclut un membre du salon\n" +
+      "⛔ **Bloquer** — Bloque un membre définitivement\n" +
+      "✅ **Autoriser** — Autorise un membre bloqué à revenir\n" +
+      "➕ **Ajouter** — Ajoute un membre à ton salon\n" +
+      "👑 **Réclamer** — Devient propriétaire si le salon est sans owner\n" +
+      "🔄 **Transférer** — Transfère la propriété à un autre membre"
+    );
+
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("vc_rename")
+      .setLabel("Renommer")
+      .setStyle(ButtonStyle.Secondary)
+      .setEmoji("📝"),
+    new ButtonBuilder()
+      .setCustomId("vc_limit")
+      .setLabel("Limite")
+      .setStyle(ButtonStyle.Secondary)
+      .setEmoji("👥"),
+    new ButtonBuilder()
+      .setCustomId("vc_quality")
+      .setLabel("Qualité")
+      .setStyle(ButtonStyle.Secondary)
+      .setEmoji("🔊")
+  );
+
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("vc_lock")
+      .setLabel("Verrouiller")
+      .setStyle(ButtonStyle.Secondary)
+      .setEmoji("🔒")
+      .setDisabled(isLocked),
+    new ButtonBuilder()
+      .setCustomId("vc_unlock")
+      .setLabel("Déverrouiller")
+      .setStyle(ButtonStyle.Secondary)
+      .setEmoji("🔓")
+      .setDisabled(!isLocked)
+  );
+
+  const row3 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("vc_hide")
+      .setLabel("Masquer")
+      .setStyle(ButtonStyle.Secondary)
+      .setEmoji("👁️")
+      .setDisabled(isHidden),
+    new ButtonBuilder()
+      .setCustomId("vc_show")
+      .setLabel("Afficher")
+      .setStyle(ButtonStyle.Secondary)
+      .setEmoji("👁️‍🗨️")
+      .setDisabled(!isHidden)
+  );
+
+  const row4 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("vc_kick")
+      .setLabel("Exclure")
+      .setStyle(ButtonStyle.Danger)
+      .setEmoji("🚫"),
+    new ButtonBuilder()
+      .setCustomId("vc_block")
+      .setLabel("Bloquer")
+      .setStyle(ButtonStyle.Danger)
+      .setEmoji("⛔"),
+    new ButtonBuilder()
+      .setCustomId("vc_allow")
+      .setLabel("Autoriser")
+      .setStyle(ButtonStyle.Success)
+      .setEmoji("✅")
+  );
+
+  const row5 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("vc_add")
+      .setLabel("Ajouter")
+      .setStyle(ButtonStyle.Primary)
+      .setEmoji("➕"),
+    new ButtonBuilder()
+      .setCustomId("vc_claim")
+      .setLabel("Réclamer")
+      .setStyle(ButtonStyle.Primary)
+      .setEmoji("👑"),
+    new ButtonBuilder()
+      .setCustomId("vc_transfer")
+      .setLabel("Transférer")
+      .setStyle(ButtonStyle.Primary)
+      .setEmoji("🔄")
+  );
+
+  return {
+    embeds: [embed],
+    components: [row1, row2, row3, row4, row5]
+  };
+}
+
+
+// ======================================================
+// CRÉATION D'UNE VOCALE PRIVÉE
+// ======================================================
+
+async function createPrivateVoiceChannel(member, hubChannel) {
+  const guild = member.guild;
+  const hubName = hubChannel.name.toLowerCase();
+  const hubType = VOCAL_HUBS[hubName] || 2;
+
+  // Trouver la catégorie du hub
+  const category = hubChannel.parent;
+
+  // Créer le nom du salon
+  const typeLabel = hubType === 2 ? "Duo" : "Trio";
+  const channelName = `${typeLabel} de ${member.user.username}`;
+
+  // Permissions : privé par défaut
+  const permissionOverwrites = [
+    {
+      id: guild.roles.everyone.id,
+      deny: [
+        PermissionFlagsBits.ViewChannel
+      ]
+    },
+    {
+      id: member.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.Connect,
+        PermissionFlagsBits.Speak,
+        PermissionFlagsBits.Stream,
+        PermissionFlagsBits.UseVAD,
+        PermissionFlagsBits.ManageChannels
+      ]
+    },
+    {
+      id: client.user.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.Connect,
+        PermissionFlagsBits.ManageChannels,
+        PermissionFlagsBits.MoveMembers
+      ]
+    }
+  ];
+
+  const newChannel = await guild.channels.create({
+    name: channelName,
+    type: ChannelType.GuildVoice,
+    parent: category,
+    userLimit: hubType,
+    permissionOverwrites
+  }).catch(() => null);
+
+  if (!newChannel) {
+    console.error("Impossible de créer la vocale privée");
+    return null;
+  }
+
+  // Déplacer le membre dans le nouveau salon
+  await member.voice.setChannel(newChannel).catch(() => {});
+
+  // Enregistrer les infos
+  const channelInfo = {
+    ownerId: member.id,
+    hubType,
+    locked: false,
+    hidden: true,
+    blockedUsers: [],
+    panelMessageId: null
+  };
+
+  privateVoiceChannels.set(newChannel.id, channelInfo);
+  saveVocalData();
+
+  // Créer un salon texte associé pour le panel
+  const textChannel = await guild.channels.create({
+    name: `panel-${channelName.toLowerCase().replace(/[^a-z0-9-_]/g, "-")}`,
+    type: ChannelType.GuildText,
+    parent: category,
+    topic: `panel-vocal:${newChannel.id}`,
+    permissionOverwrites: [
+      {
+        id: guild.roles.everyone.id,
+        deny: [PermissionFlagsBits.ViewChannel]
+      },
+      {
+        id: member.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory
+        ]
+      },
+      {
+        id: client.user.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.ManageMessages
+        ]
+      }
+    ]
+  }).catch(() => null);
+
+  if (textChannel) {
+    const panel = buildVoiceControlPanel(newChannel, member.user);
+    const panelMsg = await textChannel.send(panel).catch(() => null);
+
+    if (panelMsg) {
+      channelInfo.panelMessageId = panelMsg.id;
+      channelInfo.panelChannelId = textChannel.id;
+      privateVoiceChannels.set(newChannel.id, channelInfo);
+      saveVocalData();
+    }
+  }
+
+  return newChannel;
+}
+
+
+// ======================================================
+// METTRE À JOUR LE PANEL
+// ======================================================
+
+async function updateVoicePanel(voiceChannel) {
+  const info = privateVoiceChannels.get(voiceChannel.id);
+  if (!info || !info.panelMessageId || !info.panelChannelId) return;
+
+  const guild = voiceChannel.guild;
+  const textChannel = guild.channels.cache.get(info.panelChannelId);
+  if (!textChannel) return;
+
+  const panelMsg = await textChannel.messages.fetch(info.panelMessageId).catch(() => null);
+  if (!panelMsg) return;
+
+  const owner = await guild.members.fetch(info.ownerId).catch(() => null);
+  const panel = buildVoiceControlPanel(voiceChannel, owner?.user || { id: info.ownerId });
+
+  await panelMsg.edit(panel).catch(() => {});
+}
+
+
+// ======================================================
+// SUPPRESSION D'UNE VOCALE PRIVÉE
+// ======================================================
+
+async function deletePrivateVoiceChannel(voiceChannel) {
+  const info = privateVoiceChannels.get(voiceChannel.id);
+
+  // Supprimer le salon texte du panel si existant
+  if (info?.panelChannelId) {
+    const textChannel = voiceChannel.guild.channels.cache.get(info.panelChannelId);
+    if (textChannel) {
+      await textChannel.delete().catch(() => {});
+    }
+  }
+
+  privateVoiceChannels.delete(voiceChannel.id);
+  saveVocalData();
+}
+
+
+// ======================================================
+// VÉRIFIER SI UN MEMBRE EST PROPRIÉTAIRE
+// ======================================================
+
+function isVoiceOwner(voiceChannelId, userId) {
+  const info = privateVoiceChannels.get(voiceChannelId);
+  return info?.ownerId === userId;
+}
+
 // Permet d'éviter les doubles logs
 // ======================================================
 
@@ -2513,6 +2877,12 @@ client.once(
 
       await restoreTempBans();
 
+      // Restaurer les données des vocales privées
+      restoreVocalData();
+      console.log(
+        "✅ Vocales privées restaurées !"
+      );
+
     } catch (error) {
 
       console.error(
@@ -4266,6 +4636,1297 @@ client.on(
       );
 
       return;
+    }
+
+
+    // ==================================================
+    // SYSTÈME DE VOCALES PRIVÉES — BOUTONS
+    // ==================================================
+
+    if (
+      interaction.isButton() &&
+      interaction.customId.startsWith("vc_")
+    ) {
+
+      const customId = interaction.customId;
+
+      // Trouver le salon vocal associé via le topic du salon texte
+      const topicMatch =
+        interaction.channel.topic?.match(
+          /panel-vocal:(\d+)/
+        );
+      const voiceChannelId =
+        topicMatch?.[1];
+
+      if (!voiceChannelId) {
+        await interaction.reply({
+          content:
+            "❌ Impossible de trouver le salon vocal associé.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      const voiceChannel =
+        interaction.guild.channels.cache.get(
+          voiceChannelId
+        );
+
+      if (!voiceChannel) {
+        await interaction.reply({
+          content:
+            "❌ Le salon vocal n'existe plus.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      const info =
+        privateVoiceChannels.get(
+          voiceChannelId
+        );
+
+      // Vérification propriétaire (sauf pour claim)
+      if (
+        customId !== "vc_claim" &&
+        !isVoiceOwner(
+          voiceChannelId,
+          interaction.user.id
+        )
+      ) {
+        await interaction.reply({
+          content:
+            "❌ Seul le propriétaire peut gérer ce salon.",
+          ephemeral: true
+        });
+        return;
+      }
+
+
+      // ================================================
+      // RENOMMER — Ouvre un modal
+      // ================================================
+      if (customId === "vc_rename") {
+        const modal =
+          new ModalBuilder()
+            .setCustomId(
+              "vc_rename_modal"
+            )
+            .setTitle(
+              "📝 Renommer le salon"
+            );
+
+        const nameInput =
+          new TextInputBuilder()
+            .setCustomId(
+              "vc_name_input"
+            )
+            .setLabel(
+              "Nouveau nom du salon"
+            )
+            .setStyle(
+              TextInputStyle.Short
+            )
+            .setPlaceholder(
+              "Mon salon cool"
+            )
+            .setRequired(true)
+            .setMinLength(1)
+            .setMaxLength(100);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            nameInput
+          )
+        );
+
+        await interaction.showModal(
+          modal
+        );
+        return;
+      }
+
+
+      // ================================================
+      // LIMITE — Ouvre un modal
+      // ================================================
+      if (customId === "vc_limit") {
+        const modal =
+          new ModalBuilder()
+            .setCustomId(
+              "vc_limit_modal"
+            )
+            .setTitle(
+              "👥 Modifier la limite"
+            );
+
+        const limitInput =
+          new TextInputBuilder()
+            .setCustomId(
+              "vc_limit_input"
+            )
+            .setLabel(
+              "Nombre maximum de membres (1-99)"
+            )
+            .setStyle(
+              TextInputStyle.Short
+            )
+            .setPlaceholder(
+              "2"
+            )
+            .setRequired(true)
+            .setMinLength(1)
+            .setMaxLength(2);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            limitInput
+          )
+        );
+
+        await interaction.showModal(
+          modal
+        );
+        return;
+      }
+
+
+      // ================================================
+      // QUALITÉ — Menu sélection bitrate
+      // ================================================
+      if (customId === "vc_quality") {
+        const row =
+          new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+              .setCustomId(
+                "vc_quality_select"
+              )
+              .setPlaceholder(
+                "Choisis la qualité audio"
+              )
+              .addOptions(
+                {
+                  label:
+                    "64 kbps (Faible)",
+                  value: "64000",
+                  description:
+                    "Basse qualité, moins de données",
+                  emoji: "🔉"
+                },
+                {
+                  label:
+                    "96 kbps (Moyen)",
+                  value: "96000",
+                  description:
+                    "Qualité standard",
+                  emoji: "🔊"
+                },
+                {
+                  label:
+                    "128 kbps (Élevé)",
+                  value: "128000",
+                  description:
+                    "Haute qualité",
+                  emoji: "🎧"
+                },
+                {
+                  label:
+                    "256 kbps (Très élevé)",
+                  value: "256000",
+                  description:
+                    "Qualité maximale",
+                  emoji: "🎙️"
+                },
+                {
+                  label:
+                    "384 kbps (Ultra)",
+                  value: "384000",
+                  description:
+                    "Qualité ultra (serveur boosté)",
+                  emoji: "💎"
+                }
+              )
+          );
+
+        await interaction.reply({
+          content:
+            "🎵 Choisis la qualité audio du salon :",
+          components: [row],
+          ephemeral: true
+        });
+        return;
+      }
+
+
+      // ================================================
+      // VERROUILLER
+      // ================================================
+      if (customId === "vc_lock") {
+        await voiceChannel.permissionOverwrites.edit(
+          interaction.guild.roles.everyone,
+          {
+            Connect: false
+          }
+        );
+
+        info.locked = true;
+        privateVoiceChannels.set(
+          voiceChannelId,
+          info
+        );
+        saveVocalData();
+
+        await updateVoicePanel(
+          voiceChannel
+        );
+
+        await interaction.reply({
+          content:
+            "🔒 Salon verrouillé ! Personne ne peut rejoindre.",
+          ephemeral: true
+        });
+        return;
+      }
+
+
+      // ================================================
+      // DÉVERROUILLER
+      // ================================================
+      if (customId === "vc_unlock") {
+        await voiceChannel.permissionOverwrites.edit(
+          interaction.guild.roles.everyone,
+          {
+            Connect: null
+          }
+        );
+
+        info.locked = false;
+        privateVoiceChannels.set(
+          voiceChannelId,
+          info
+        );
+        saveVocalData();
+
+        await updateVoicePanel(
+          voiceChannel
+        );
+
+        await interaction.reply({
+          content:
+            "🔓 Salon déverrouillé ! Tout le monde peut rejoindre.",
+          ephemeral: true
+        });
+        return;
+      }
+
+
+      // ================================================
+      // MASQUER
+      // ================================================
+      if (customId === "vc_hide") {
+        await voiceChannel.permissionOverwrites.edit(
+          interaction.guild.roles.everyone,
+          {
+            ViewChannel: false
+          }
+        );
+
+        info.hidden = true;
+        privateVoiceChannels.set(
+          voiceChannelId,
+          info
+        );
+        saveVocalData();
+
+        await updateVoicePanel(
+          voiceChannel
+        );
+
+        await interaction.reply({
+          content:
+            "👁️ Salon masqué ! Les autres ne le voient plus.",
+          ephemeral: true
+        });
+        return;
+      }
+
+
+      // ================================================
+      // AFFICHER
+      // ================================================
+      if (customId === "vc_show") {
+        await voiceChannel.permissionOverwrites.edit(
+          interaction.guild.roles.everyone,
+          {
+            ViewChannel: null
+          }
+        );
+
+        info.hidden = false;
+        privateVoiceChannels.set(
+          voiceChannelId,
+          info
+        );
+        saveVocalData();
+
+        await updateVoicePanel(
+          voiceChannel
+        );
+
+        await interaction.reply({
+          content:
+            "👁️‍🗨️ Salon visible ! Tout le monde peut le voir.",
+          ephemeral: true
+        });
+        return;
+      }
+
+
+      // ================================================
+      // EXCLURE — Menu sélection membre
+      // ================================================
+      if (customId === "vc_kick") {
+        const members =
+          voiceChannel.members.filter(
+            m =>
+              m.id !== info.ownerId &&
+              m.id !== client.user.id
+          );
+
+        if (members.size === 0) {
+          await interaction.reply({
+            content:
+              "❌ Aucun membre à exclure.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        const options =
+          members
+            .map(m => ({
+              label:
+                m.user
+                  .username,
+              value: m.id,
+              description:
+                `ID: ${m.id}`
+            }))
+            .slice(0, 25);
+
+        const row =
+          new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+              .setCustomId(
+                "vc_kick_select"
+              )
+              .setPlaceholder(
+                "Choisis le membre à exclure"
+              )
+              .addOptions(
+                options
+              )
+          );
+
+        await interaction.reply({
+          content:
+            "🚫 Choisis le membre à exclure :",
+          components: [row],
+          ephemeral: true
+        });
+        return;
+      }
+
+
+      // ================================================
+      // BLOQUER — Menu sélection membre
+      // ================================================
+      if (customId === "vc_block") {
+        const members =
+          voiceChannel.members.filter(
+            m =>
+              m.id !== info.ownerId &&
+              m.id !== client.user.id
+          );
+
+        if (members.size === 0) {
+          await interaction.reply({
+            content:
+              "❌ Aucun membre dans le salon à bloquer.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        const options =
+          members
+            .map(m => ({
+              label:
+                m.user
+                  .username,
+              value: m.id,
+              description:
+                `ID: ${m.id}`
+            }))
+            .slice(0, 25);
+
+        const row =
+          new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+              .setCustomId(
+                "vc_block_select"
+              )
+              .setPlaceholder(
+                "Choisis le membre à bloquer"
+              )
+              .addOptions(
+                options
+              )
+          );
+
+        await interaction.reply({
+          content:
+            "⛔ Choisis le membre à bloquer :",
+          components: [row],
+          ephemeral: true
+        });
+        return;
+      }
+
+
+      // ================================================
+      // AUTORISER — Menu sélection membre bloqué
+      // ================================================
+      if (customId === "vc_allow") {
+        if (
+          !info.blockedUsers ||
+          info.blockedUsers.length ===
+            0
+        ) {
+          await interaction.reply({
+            content:
+              "✅ Aucun membre bloqué.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        const options = [];
+        for (
+          const blockedId
+            of info.blockedUsers
+        ) {
+          const user =
+            await client.users
+              .fetch(blockedId)
+              .catch(
+                () => null
+              );
+          if (user) {
+            options.push({
+              label:
+                user.username,
+              value: blockedId,
+              description:
+                `ID: ${blockedId}`
+            });
+          }
+        }
+
+        if (options.length === 0) {
+          await interaction.reply({
+            content:
+              "✅ Aucun membre bloqué trouvé.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        const row =
+          new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+              .setCustomId(
+                "vc_allow_select"
+              )
+              .setPlaceholder(
+                "Choisis le membre à autoriser"
+              )
+              .addOptions(
+                options
+              )
+          );
+
+        await interaction.reply({
+          content:
+            "✅ Choisis le membre à autoriser :",
+          components: [row],
+          ephemeral: true
+        });
+        return;
+      }
+
+
+      // ================================================
+      // AJOUTER — Ouvre un modal
+      // ================================================
+      if (customId === "vc_add") {
+        const modal =
+          new ModalBuilder()
+            .setCustomId(
+              "vc_add_modal"
+            )
+            .setTitle(
+              "➕ Ajouter un membre"
+            );
+
+        const memberInput =
+          new TextInputBuilder()
+            .setCustomId(
+              "vc_add_input"
+            )
+            .setLabel(
+              "ID du membre à ajouter"
+            )
+            .setStyle(
+              TextInputStyle.Short
+            )
+            .setPlaceholder(
+              "123456789012345678"
+            )
+            .setRequired(true);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            memberInput
+          )
+        );
+
+        await interaction.showModal(
+          modal
+        );
+        return;
+      }
+
+
+      // ================================================
+      // RÉCLAMER — Devient propriétaire
+      // ================================================
+      if (customId === "vc_claim") {
+        const currentOwner =
+          await interaction.guild.members
+            .fetch(info.ownerId)
+            .catch(
+              () => null
+            );
+
+        // Si le propriétaire est encore dans le salon
+        if (
+          currentOwner &&
+          voiceChannel.members.has(
+            info.ownerId
+          )
+        ) {
+          await interaction.reply({
+            content:
+              "❌ Le propriétaire est encore dans le salon.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        info.ownerId =
+          interaction.user.id;
+
+        // Mettre à jour les permissions
+        await voiceChannel.permissionOverwrites.edit(
+          interaction.user.id,
+          {
+            ViewChannel: true,
+            Connect: true,
+            Speak: true,
+            Stream: true,
+            UseVAD: true,
+            ManageChannels: true
+          }
+        );
+
+        // Retirer les permissions de l'ancien owner
+        if (currentOwner) {
+          await voiceChannel.permissionOverwrites.edit(
+            info.ownerId,
+            {
+              ManageChannels: null
+            }
+          );
+        }
+
+        // Mettre à jour le salon texte
+        await interaction.channel.permissionOverwrites.edit(
+          interaction.user.id,
+          {
+            ViewChannel: true,
+            SendMessages: true,
+            ReadMessageHistory: true
+          }
+        );
+
+        privateVoiceChannels.set(
+          voiceChannelId,
+          info
+        );
+        saveVocalData();
+
+        await updateVoicePanel(
+          voiceChannel
+        );
+
+        await interaction.reply({
+          content:
+            "👑 Tu es maintenant le propriétaire du salon !",
+          ephemeral: true
+        });
+        return;
+      }
+
+
+      // ================================================
+      // TRANSFÉRER — Ouvre un modal
+      // ================================================
+      if (customId === "vc_transfer") {
+        const modal =
+          new ModalBuilder()
+            .setCustomId(
+              "vc_transfer_modal"
+            )
+            .setTitle(
+              "🔄 Transférer la propriété"
+            );
+
+        const transferInput =
+          new TextInputBuilder()
+            .setCustomId(
+              "vc_transfer_input"
+            )
+            .setLabel(
+              "ID du nouveau propriétaire"
+            )
+            .setStyle(
+              TextInputStyle.Short
+            )
+            .setPlaceholder(
+              "123456789012345678"
+            )
+            .setRequired(true);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            transferInput
+          )
+        );
+
+        await interaction.showModal(
+          modal
+        );
+        return;
+      }
+    }
+
+
+    // ==================================================
+    // SYSTÈME DE VOCALES PRIVÉES — MODALS
+    // ==================================================
+
+    if (
+      interaction.isModalSubmit() &&
+      interaction.customId.startsWith(
+        "vc_"
+      )
+    ) {
+
+      const customId =
+        interaction.customId;
+
+      const topicMatch =
+        interaction.channel.topic?.match(
+          /panel-vocal:(\d+)/
+        );
+      const voiceChannelId =
+        topicMatch?.[1];
+
+      if (!voiceChannelId) {
+        await interaction.reply({
+          content:
+            "❌ Impossible de trouver le salon vocal associé.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      const voiceChannel =
+        interaction.guild.channels.cache.get(
+          voiceChannelId
+        );
+
+      if (!voiceChannel) {
+        await interaction.reply({
+          content:
+            "❌ Le salon vocal n'existe plus.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      const info =
+        privateVoiceChannels.get(
+          voiceChannelId
+        );
+
+      if (
+        !isVoiceOwner(
+          voiceChannelId,
+          interaction.user.id
+        )
+      ) {
+        await interaction.reply({
+          content:
+            "❌ Seul le propriétaire peut gérer ce salon.",
+          ephemeral: true
+        });
+        return;
+      }
+
+
+      // ================================================
+      // MODAL RENOMMER
+      // ================================================
+      if (
+        customId === "vc_rename_modal"
+      ) {
+        const newName =
+          interaction.fields.getTextInputValue(
+            "vc_name_input"
+          );
+
+        await voiceChannel.setName(
+          newName
+        );
+
+        await interaction.reply({
+          content:
+            `📝 Salon renommé en : **${newName}**`,
+          ephemeral: true
+        });
+
+        await updateVoicePanel(
+          voiceChannel
+        );
+        return;
+      }
+
+
+      // ================================================
+      // MODAL LIMITE
+      // ================================================
+      if (
+        customId === "vc_limit_modal"
+      ) {
+        const limitStr =
+          interaction.fields.getTextInputValue(
+            "vc_limit_input"
+          );
+        const limit =
+          parseInt(limitStr, 10);
+
+        if (
+          isNaN(limit) ||
+          limit < 1 ||
+          limit > 99
+        ) {
+          await interaction.reply({
+            content:
+              "❌ La limite doit être un nombre entre 1 et 99.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        await voiceChannel.setUserLimit(
+          limit
+        );
+
+        await interaction.reply({
+          content:
+            `👥 Limite définie à : **${limit}**`,
+          ephemeral: true
+        });
+
+        await updateVoicePanel(
+          voiceChannel
+        );
+        return;
+      }
+
+
+      // ================================================
+      // MODAL AJOUTER
+      // ================================================
+      if (
+        customId === "vc_add_modal"
+      ) {
+        const memberId =
+          interaction.fields.getTextInputValue(
+            "vc_add_input"
+          );
+
+        const member =
+          await interaction.guild.members
+            .fetch(memberId)
+            .catch(
+              () => null
+            );
+
+        if (!member) {
+          await interaction.reply({
+            content:
+              "❌ Membre introuvable. Vérifie l'ID.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        // Autoriser le membre à voir et rejoindre
+        await voiceChannel.permissionOverwrites.edit(
+          member.id,
+          {
+            ViewChannel: true,
+            Connect: true
+          }
+        );
+
+        // Autoriser dans le salon texte aussi
+        await interaction.channel.permissionOverwrites.edit(
+          member.id,
+          {
+            ViewChannel: true,
+            SendMessages: true,
+            ReadMessageHistory: true
+          }
+        );
+
+        await interaction.reply({
+          content:
+            `➕ <@${member.id}> a été ajouté au salon !`,
+          ephemeral: true
+        });
+        return;
+      }
+
+
+      // ================================================
+      // MODAL TRANSFÉRER
+      // ================================================
+      if (
+        customId ===
+          "vc_transfer_modal"
+      ) {
+        const newOwnerId =
+          interaction.fields.getTextInputValue(
+            "vc_transfer_input"
+          );
+
+        const newOwner =
+          await interaction.guild.members
+            .fetch(newOwnerId)
+            .catch(
+              () => null
+            );
+
+        if (!newOwner) {
+          await interaction.reply({
+            content:
+              "❌ Membre introuvable. Vérifie l'ID.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        // Retirer ManageChannels de l'ancien owner
+        await voiceChannel.permissionOverwrites.edit(
+          interaction.user.id,
+          {
+            ManageChannels: null
+          }
+        );
+
+        // Ajouter les permissions au nouveau owner
+        await voiceChannel.permissionOverwrites.edit(
+          newOwner.id,
+          {
+            ViewChannel: true,
+            Connect: true,
+            Speak: true,
+            Stream: true,
+            UseVAD: true,
+            ManageChannels: true
+          }
+        );
+
+        // Mettre à jour le salon texte
+        await interaction.channel.permissionOverwrites.edit(
+          newOwner.id,
+          {
+            ViewChannel: true,
+            SendMessages: true,
+            ReadMessageHistory: true
+          }
+        );
+
+        info.ownerId = newOwner.id;
+        privateVoiceChannels.set(
+          voiceChannelId,
+          info
+        );
+        saveVocalData();
+
+        await updateVoicePanel(
+          voiceChannel
+        );
+
+        await interaction.reply({
+          content:
+            `🔄 Propriété transférée à <@${newOwner.id}> !`,
+          ephemeral: true
+        });
+        return;
+      }
+    }
+
+
+    // ==================================================
+    // SYSTÈME DE VOCALES PRIVÉES — SELECT MENUS
+    // ==================================================
+
+    if (
+      interaction.isStringSelectMenu() &&
+      interaction.customId.startsWith(
+        "vc_"
+      )
+    ) {
+
+      const customId =
+        interaction.customId;
+      const selectedValue =
+        interaction.values[0];
+
+      const topicMatch =
+        interaction.channel.topic?.match(
+          /panel-vocal:(\d+)/
+        );
+      const voiceChannelId =
+        topicMatch?.[1];
+
+      if (!voiceChannelId) {
+        await interaction.reply({
+          content:
+            "❌ Impossible de trouver le salon vocal associé.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      const voiceChannel =
+        interaction.guild.channels.cache.get(
+          voiceChannelId
+        );
+
+      if (!voiceChannel) {
+        await interaction.reply({
+          content:
+            "❌ Le salon vocal n'existe plus.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      const info =
+        privateVoiceChannels.get(
+          voiceChannelId
+        );
+
+      if (
+        customId !== "vc_allow_select" &&
+        !isVoiceOwner(
+          voiceChannelId,
+          interaction.user.id
+        )
+      ) {
+        await interaction.reply({
+          content:
+            "❌ Seul le propriétaire peut gérer ce salon.",
+          ephemeral: true
+        });
+        return;
+      }
+
+
+      // ================================================
+      // QUALITÉ AUDIO
+      // ================================================
+      if (
+        customId ===
+          "vc_quality_select"
+      ) {
+        const bitrate =
+          parseInt(selectedValue, 10);
+
+        await voiceChannel.setBitrate(
+          bitrate
+        );
+
+        await interaction.update({
+          content:
+            `🎵 Qualité audio définie à **${bitrate / 1000} kbps** !`,
+          components: []
+        });
+        return;
+      }
+
+
+      // ================================================
+      // EXCLURE UN MEMBRE
+      // ================================================
+      if (
+        customId === "vc_kick_select"
+      ) {
+        const member =
+          await interaction.guild.members
+            .fetch(selectedValue)
+            .catch(
+              () => null
+            );
+
+        if (
+          member &&
+          member.voice.channel &&
+          member.voice.channel.id ===
+            voiceChannelId
+        ) {
+          await member.voice.setChannel(
+            null
+          );
+        }
+
+        await interaction.update({
+          content:
+            `🚫 <@${selectedValue}> a été exclu du salon.`,
+          components: []
+        });
+        return;
+      }
+
+
+      // ================================================
+      // BLOQUER UN MEMBRE
+      // ================================================
+      if (
+        customId === "vc_block_select"
+      ) {
+        // Kick le membre d'abord
+        const member =
+          await interaction.guild.members
+            .fetch(selectedValue)
+            .catch(
+              () => null
+            );
+
+        if (
+          member &&
+          member.voice.channel &&
+          member.voice.channel.id ===
+            voiceChannelId
+        ) {
+          await member.voice.setChannel(
+            null
+          );
+        }
+
+        // Bloquer l'accès
+        await voiceChannel.permissionOverwrites.edit(
+          selectedValue,
+          {
+            ViewChannel: false,
+            Connect: false
+          }
+        );
+
+        // Ajouter à la liste des bloqués
+        if (
+          !info.blockedUsers.includes(
+            selectedValue
+          )
+        ) {
+          info.blockedUsers.push(
+            selectedValue
+          );
+        }
+
+        privateVoiceChannels.set(
+          voiceChannelId,
+          info
+        );
+        saveVocalData();
+
+        await interaction.update({
+          content:
+            `⛔ <@${selectedValue}> a été bloqué du salon.`,
+          components: []
+        });
+        return;
+      }
+
+
+      // ================================================
+      // AUTORISER UN MEMBRE BLOQUÉ
+      // ================================================
+      if (
+        customId === "vc_allow_select"
+      ) {
+        // Retirer la permission de blocage
+        await voiceChannel.permissionOverwrites.edit(
+          selectedValue,
+          {
+            ViewChannel: null,
+            Connect: null
+          }
+        );
+
+        // Retirer de la liste des bloqués
+        info.blockedUsers =
+          info.blockedUsers.filter(
+            id => id !== selectedValue
+          );
+
+        privateVoiceChannels.set(
+          voiceChannelId,
+          info
+        );
+        saveVocalData();
+
+        await interaction.update({
+          content:
+            `✅ <@${selectedValue}> a été autorisé à revenir.`,
+          components: []
+        });
+        return;
+      }
+    }
+  }
+);
+
+
+// ======================================================
+// VOICE STATE UPDATE — CRÉATION/SUPPRESSION AUTO
+// ======================================================
+
+client.on(
+  "voiceStateUpdate",
+  async (oldState, newState) => {
+
+    // ------------------------------------------------
+    // Un membre rejoint un salon hub → créer vocale
+    // ------------------------------------------------
+    if (
+      newState.channel &&
+      !oldState.channel
+    ) {
+      const hubName =
+        newState.channel.name.toLowerCase();
+
+      if (VOCAL_HUBS[hubName]) {
+        await createPrivateVoiceChannel(
+          newState.member,
+          newState.channel
+        );
+      }
+    }
+
+    // ------------------------------------------------
+    // Un membre quitte un salon → vérifier si vide
+    // ------------------------------------------------
+    if (
+      oldState.channel &&
+      !newState.channel
+    ) {
+      const channel =
+        oldState.channel;
+
+      if (
+        privateVoiceChannels.has(
+          channel.id
+        )
+      ) {
+        // Vérifier s'il reste des membres
+        // (exclure le bot lui-même)
+        const humanMembers =
+          channel.members.filter(
+            m =>
+              m.id !==
+              client.user.id
+          );
+
+        if (
+          humanMembers.size === 0
+        ) {
+          await deletePrivateVoiceChannel(
+            channel
+          );
+        }
+      }
+    }
+
+    // ------------------------------------------------
+    // Un membre bouge d'un salon à un autre
+    // → vérifier l'ancien salon (vide ?)
+    // → vérifier le nouveau salon (hub ?)
+    // ------------------------------------------------
+    if (
+      oldState.channel &&
+      newState.channel &&
+      oldState.channel.id !==
+        newState.channel.id
+    ) {
+      // Ancien salon privé vide ?
+      if (
+        privateVoiceChannels.has(
+          oldState.channel.id
+        )
+      ) {
+        const humanMembers =
+          oldState.channel.members.filter(
+            m =>
+              m.id !==
+              client.user.id
+          );
+
+        if (
+          humanMembers.size === 0
+        ) {
+          await deletePrivateVoiceChannel(
+            oldState.channel
+          );
+        }
+      }
+
+      // Nouveau salon = hub ?
+      const hubName =
+        newState.channel.name.toLowerCase();
+
+      if (VOCAL_HUBS[hubName]) {
+        await createPrivateVoiceChannel(
+          newState.member,
+          newState.channel
+        );
+      }
     }
   }
 );
