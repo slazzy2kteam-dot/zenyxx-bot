@@ -110,7 +110,7 @@ const COUNTER_CHANNELS = {
   "1547260849830367334": { type: "tiktok", label: "👥 Abonnés Tiktok", username: "aetherofficiel" }
 };
 
-const TIKTOK_INTERVAL_MS = 30 * 1000; // 30 secondes
+const TIKTOK_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 const MEMBER_INTERVAL_MS = 30 * 1000; // 30 secondes
 
 // File d'attente pour contourner la limite Discord (2 renommages / 10 min par salon)
@@ -170,7 +170,11 @@ async function updateMemberCounters(guild) {
   enqueueCounterUpdate("1547260234077311046", `👥 Membres : ${count}`);
 }
 
+let tiktokFetching = false; // Protection anti-empilement
+
 async function updateTikTokCounter(guild) {
+  if (tiktokFetching) return; // Une requête est déjà en cours, on attend
+  tiktokFetching = true;
   const tiktokChannel = guild.channels.cache.get("1547260849830367334");
   if (!tiktokChannel) {
     return;
@@ -216,6 +220,8 @@ async function updateTikTokCounter(guild) {
     }
   } catch (error) {
     console.error("[Compteur TikTok] Erreur:", error.message);
+  } finally {
+    tiktokFetching = false; // Toujours libérer, même en cas d'erreur
   }
 }
 
