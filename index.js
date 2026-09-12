@@ -675,7 +675,7 @@ async function sendLog(
   color = 0x5865F2,
   channelId = null
 ) {
-  const channel =
+  let channel =
     channelId
       ? guild.channels.cache.get(channelId)
       : getLogChannel(
@@ -683,7 +683,16 @@ async function sendLog(
           channelName
         );
 
+  if (!channel && channelId) {
+    try {
+      channel = await guild.channels.fetch(channelId);
+    } catch (e) {
+      console.error(`[sendLog] Impossible de fetch le salon ${channelId}:`, e.message);
+    }
+  }
+
   if (!channel) {
+    console.warn(`[sendLog] Salon introuvable – nom: "${channelName}", id: ${channelId}`);
     return;
   }
 
@@ -8485,197 +8494,148 @@ client.on(
 
 
 // ======================================================
-// WEBHOOK CRÉÉ
+// WEBHOOKS (CRÉÉ / SUPPRIMÉ / MODIFIÉ)
+// Utilise guildAuditLogEntryCreate car les événements
+// webhookCreate/webhookDelete/webhookUpdate n'existent pas
+// dans discord.js v14
 // ======================================================
 
 client.on(
-  "webhookCreate",
-  async webhook => {
+  "guildAuditLogEntryCreate",
+  async (auditLogEntry, guild) => {
 
-    if (!webhook.guild) return;
+    // Filtrer uniquement les actions webhook
+    if (
+      auditLogEntry.action !== AuditLogEvent.WebhookCreate &&
+      auditLogEntry.action !== AuditLogEvent.WebhookDelete &&
+      auditLogEntry.action !== AuditLogEvent.WebhookUpdate
+    ) return;
 
-    let executor = null;
+    const executor = auditLogEntry.executor;
+    const target = auditLogEntry.target;
 
-    try {
-      const logs = await webhook.guild.fetchAuditLogs({
-        type: AuditLogEvent.WebhookCreate,
-        limit: 5
-      });
+    if (auditLogEntry.action === AuditLogEvent.WebhookCreate) {
+      const changes = auditLogEntry.changes || [];
+      const nameChange = changes.find(c => c.key === "name");
+      const channelChange = changes.find(c => c.key === "channel_id");
+      const webhookName = nameChange?.new || "Inconnu";
+      const webhookChannel = channelChange?.new || null;
 
-      const entry = logs.entries.find(e =>
-        e.target?.id === webhook.id &&
-        Date.now() - e.createdTimestamp < 15000
+      await sendLog(
+        guild,
+        "🪝 Webhook créé",
+        null,
+        ADMIN_LOG_CHANNEL_NAME,
+        [
+          {
+            name: "🪝 Webhook",
+            value: `\`${webhookName}\``,
+            inline: true
+          },
+          {
+            name: "📍 Salon",
+            value: webhookChannel ? `<#${webhookChannel}>` : "Inconnu",
+            inline: true
+          },
+          {
+            name: "🛡️ Créé par",
+            value: executor ? `${executor}` : "Inconnu",
+            inline: true
+          },
+          {
+            name: "🔗 ID",
+            value: target?.id ? `\`${target.id}\`` : "Inconnu",
+            inline: true
+          }
+        ],
+        0x57F287,
+        ADMIN_LOG_CHANNEL_ID
       );
-
-      if (entry) executor = entry.executor;
-    } catch (error) {
-      console.error("Impossible de lire les logs d'audit (webhook créé) :", error);
     }
 
-    await sendLog(
-      webhook.guild,
-      "🪝 Webhook créé",
-      null,
-      ADMIN_LOG_CHANNEL_NAME,
-      [
+    if (auditLogEntry.action === AuditLogEvent.WebhookDelete) {
+      const changes = auditLogEntry.changes || [];
+      const nameChange = changes.find(c => c.key === "name");
+      const channelChange = changes.find(c => c.key === "channel_id");
+      const webhookName = nameChange?.old || "Inconnu";
+      const webhookChannel = channelChange?.old || null;
+
+      await sendLog(
+        guild,
+        "🗑️ Webhook supprimé",
+        null,
+        ADMIN_LOG_CHANNEL_NAME,
+        [
+          {
+            name: "🪝 Webhook",
+            value: `\`${webhookName}\``,
+            inline: true
+          },
+          {
+            name: "📍 Salon",
+            value: webhookChannel ? `<#${webhookChannel}>` : "Inconnu",
+            inline: true
+          },
+          {
+            name: "🛡️ Supprimé par",
+            value: executor ? `${executor}` : "Inconnu",
+            inline: true
+          }
+        ],
+        0xED4245,
+        ADMIN_LOG_CHANNEL_ID
+      );
+    }
+
+    if (auditLogEntry.action === AuditLogEvent.WebhookUpdate) {
+      const changes = auditLogEntry.changes || [];
+      const nameChange = changes.find(c => c.key === "name");
+      const channelChange = changes.find(c => c.key === "channel_id");
+
+      const fields = [
         {
           name: "🪝 Webhook",
-          value: `\`${webhook.name}\``,
-          inline: true
-        },
-        {
-          name: "📍 Salon",
-          value: webhook.channelId ? `<#${webhook.channelId}>` : "Inconnu",
-          inline: true
-        },
-        {
-          name: "🛡️ Créé par",
-          value: executor ? `${executor}` : "Inconnu",
-          inline: true
-        },
-        {
-          name: "🔗 ID",
-          value: `\`${webhook.id}\``,
-          inline: true
+          value: `\`${nameChange?.new || "Inconnu"}\``,
+          inline: false
         }
-      ],
-      0x57F287,
-      ADMIN_LOG_CHANNEL_ID
-    );
-  }
-);
+      ];
 
-
-// ======================================================
-// WEBHOOK SUPPRIMÉ
-// ======================================================
-
-client.on(
-  "webhookDelete",
-  async webhook => {
-
-    if (!webhook.guild) return;
-
-    let executor = null;
-
-    try {
-      const logs = await webhook.guild.fetchAuditLogs({
-        type: AuditLogEvent.WebhookDelete,
-        limit: 5
-      });
-
-      const entry = logs.entries.find(e =>
-        e.target?.id === webhook.id &&
-        Date.now() - e.createdTimestamp < 15000
-      );
-
-      if (entry) executor = entry.executor;
-    } catch (error) {
-      console.error("Impossible de lire les logs d'audit (webhook supprimé) :", error);
-    }
-
-    await sendLog(
-      webhook.guild,
-      "🗑️ Webhook supprimé",
-      null,
-      ADMIN_LOG_CHANNEL_NAME,
-      [
-        {
-          name: "🪝 Webhook",
-          value: `\`${webhook.name}\``,
-          inline: true
-        },
-        {
-          name: "📍 Salon",
-          value: webhook.channelId ? `<#${webhook.channelId}>` : "Inconnu",
-          inline: true
-        },
-        {
-          name: "🛡️ Supprimé par",
-          value: executor ? `${executor}` : "Inconnu",
-          inline: true
-        }
-      ],
-      0xED4245,
-      ADMIN_LOG_CHANNEL_ID
-    );
-  }
-);
-
-
-// ======================================================
-// WEBHOOK MODIFIÉ
-// ======================================================
-
-client.on(
-  "webhookUpdate",
-  async (oldWebhook, newWebhook) => {
-
-    if (!newWebhook.guild) return;
-
-    if (oldWebhook.name === newWebhook.name &&
-        oldWebhook.channelId === newWebhook.channelId) return;
-
-    let executor = null;
-
-    try {
-      const logs = await newWebhook.guild.fetchAuditLogs({
-        type: AuditLogEvent.WebhookUpdate,
-        limit: 5
-      });
-
-      const entry = logs.entries.find(e =>
-        e.target?.id === newWebhook.id &&
-        Date.now() - e.createdTimestamp < 15000
-      );
-
-      if (entry) executor = entry.executor;
-    } catch (error) {
-      console.error("Impossible de lire les logs d'audit (webhook modifié) :", error);
-    }
-
-    const changes = [
-      {
-        name: "🪝 Webhook",
-        value: `\`${newWebhook.name}\``,
-        inline: false
+      if (nameChange) {
+        fields.push({
+          name: "📝 Nom",
+          value: `Avant : \`${nameChange.old}\`
+Après : \`${nameChange.new}\``,
+          inline: false
+        });
       }
-    ];
 
-    if (oldWebhook.name !== newWebhook.name) {
-      changes.push({
-        name: "📝 Nom",
-        value: `Avant : \`${oldWebhook.name}\`\nAprès : \`${newWebhook.name}\``,
+      if (channelChange) {
+        fields.push({
+          name: "📍 Salon",
+          value: `Avant : <#${channelChange.old}>
+Après : <#${channelChange.new}>`,
+          inline: false
+        });
+      }
+
+      fields.push({
+        name: "🛡️ Modifié par",
+        value: executor ? `${executor}` : "Inconnu",
         inline: false
       });
+
+      await sendLog(
+        guild,
+        "✏️ Webhook modifié",
+        null,
+        ADMIN_LOG_CHANNEL_NAME,
+        fields,
+        0xFEE75C,
+        ADMIN_LOG_CHANNEL_ID
+      );
     }
-
-    if (oldWebhook.channelId !== newWebhook.channelId) {
-      changes.push({
-        name: "📍 Salon",
-        value: `Avant : <#${oldWebhook.channelId}>\nAprès : <#${newWebhook.channelId}>`,
-        inline: false
-      });
-    }
-
-    changes.push({
-      name: "🛡️ Modifié par",
-      value: executor ? `${executor}` : "Inconnu",
-      inline: false
-    });
-
-    await sendLog(
-      newWebhook.guild,
-      "✏️ Webhook modifié",
-      null,
-      ADMIN_LOG_CHANNEL_NAME,
-      changes,
-      0xFEE75C,
-      ADMIN_LOG_CHANNEL_ID
-    );
   }
 );
-
 
 // ======================================================
 // SERVEUR MODIFIÉ
