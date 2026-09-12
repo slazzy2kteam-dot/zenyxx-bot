@@ -313,7 +313,7 @@ function buildVoiceControlPanel(channel, owner) {
   const info = privateVoiceChannels.get(channel.id);
   const isLocked = info?.locked || false;
   const isHidden = info?.hidden || false;
-  const hubType = info?.hubType || 2;
+  const hubType = info?.hubType !== undefined && info?.hubType !== null ? info.hubType : 2;
   const limit = channel.userLimit !== undefined && channel.userLimit !== null ? channel.userLimit : hubType;
 
   const limitDisplay = limit === 0 ? "Illimité" : `${limit}`;
@@ -440,7 +440,7 @@ function buildVoiceControlPanel(channel, owner) {
 
 async function createPrivateVoiceChannel(member, hubChannel) {
   const guild = member.guild;
-  const hubType = VOCAL_HUBS[hubChannel.id] || 2;
+  const hubType = hubChannel.id in VOCAL_HUBS ? VOCAL_HUBS[hubChannel.id] : 2;
 
   // Trouver la catégorie du hub
   const category = hubChannel.parent;
@@ -5820,7 +5820,7 @@ client.on(
       newState.channel &&
       !oldState.channel
     ) {
-      if (VOCAL_HUBS[newState.channel.id]) {
+      if (newState.channel.id in VOCAL_HUBS) {
         await createPrivateVoiceChannel(
           newState.member,
           newState.channel
@@ -5896,7 +5896,7 @@ client.on(
       }
 
       // Nouveau salon = hub ?
-      if (VOCAL_HUBS[newState.channel.id]) {
+      if (newState.channel.id in VOCAL_HUBS) {
         await createPrivateVoiceChannel(
           newState.member,
           newState.channel
