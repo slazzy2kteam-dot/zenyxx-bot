@@ -110,23 +110,69 @@ const COUNTER_CHANNELS = {
   "1547260849830367334": { type: "tiktok", label: "👥 Abonnés Tiktok", username: "aetherofficiel" }
 };
 
-const COUNTER_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const TIKTOK_INTERVAL_MS = 30 * 1000; // 30 secondes
+const MEMBER_INTERVAL_MS = 30 * 1000; // 30 secondes
 
-async function updateMemberCounters(guild) {
-  const memberChannel = guild.channels.cache.get("1547260234077311046");
-  if (memberChannel && memberChannel.isVoiceBased()) {
-    const count = guild.memberCount;
-    const newName = `👥 Membres : ${count}`;
-    if (memberChannel.name !== newName) {
-      await memberChannel.setName(newName).catch(() => null);
+// File d'attente pour contourner la limite Discord (2 renommages / 10 min par salon)
+const counterQueue = new Map(); // channelId -> [ { newName }, ... ]
+const counterProcessing = new Set(); // channels en cours de traitement
+
+function enqueueCounterUpdate(channelId, newName) {
+  if (!counterQueue.has(channelId)) {
+    counterQueue.set(channelId, []);
+  }
+  const queue = counterQueue.get(channelId);
+  // Remplacer le dernier si pas encore traité (on veut tjrs le chiffre le plus récent)
+  if (queue.length > 0) {
+    queue[queue.length - 1].newName = newName;
+  } else {
+    queue.push({ newName });
+  }
+  processCounterQueue(channelId);
+}
+
+async function processCounterQueue(channelId) {
+  if (counterProcessing.has(channelId)) return;
+  counterProcessing.add(channelId);
+
+  while (counterQueue.has(channelId) && counterQueue.get(channelId).length > 0) {
+    const item = counterQueue.get(channelId).shift();
+    if (counterQueue.get(channelId).length === 0) {
+      counterQueue.delete(channelId);
+    }
+
+    for (const guild of client.guilds.cache.values()) {
+      const channel = guild.channels.cache.get(channelId);
+      if (channel && channel.name !== item.newName) {
+        const result = await channel.setName(item.newName).catch(err => {
+          console.error(`[Compteur] Erreur setName ${channelId}:`, err.message);
+          return null;
+        });
+        if (!result) {
+          // Rate limité — replanifier dans 6 minutes
+          console.log(`[Compteur] Rate limité, retry dans 6 min pour ${item.newName}`);
+          setTimeout(() => {
+            enqueueCounterUpdate(channelId, item.newName);
+          }, 6 * 60 * 1000);
+          counterProcessing.delete(channelId);
+          return;
+        }
+        console.log(`[Compteur] ✅ ${item.newName}`);
+      }
     }
   }
+
+  counterProcessing.delete(channelId);
+}
+
+async function updateMemberCounters(guild) {
+  const count = guild.memberCount;
+  enqueueCounterUpdate("1547260234077311046", `👥 Membres : ${count}`);
 }
 
 async function updateTikTokCounter(guild) {
   const tiktokChannel = guild.channels.cache.get("1547260849830367334");
-  if (!tiktokChannel || !tiktokChannel.isVoiceBased()) {
-    console.log("[Compteur TikTok] Salon non trouvé ou pas vocal");
+  if (!tiktokChannel) {
     return;
   }
 
@@ -138,9 +184,7 @@ async function updateTikTokCounter(guild) {
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
           "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9,fr-FR;q=0.8",
-          "Cache-Control": "no-cache",
-          "Pragma": "no-cache"
+          "Accept-Language": "en-US,en;q=0.9,fr-FR;q=0.8"
         }
       }, res => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -162,39 +206,40 @@ async function updateTikTokCounter(guild) {
       }).on("error", reject);
     });
 
-    console.log(`[Compteur TikTok] Page récupérée, taille: ${html.length}`);
-
     const match = html.match(/"followerCount":(\d+)/);
     const followers = match ? parseInt(match[1], 10) : null;
 
-    console.log(`[Compteur TikTok] Followers trouvés: ${followers}`);
-
     if (followers !== null) {
-      const newName = `👥 Abonnés Tiktok : ${followers}`;
-      console.log(`[Compteur TikTok] Nouveau nom: ${newName}, ancien: ${tiktokChannel.name}`);
-      if (tiktokChannel.name !== newName) {
-        await tiktokChannel.setName(newName).catch(err => {
-          console.error("[Compteur TikTok] Erreur setName:", err.message);
-        });
-      }
+      enqueueCounterUpdate("1547260849830367334", `👥 Abonnés Tiktok : ${followers}`);
     } else {
-      console.error("[Compteur TikTok] Impossible de trouver followerCount dans la page");
+      console.error("[Compteur TikTok] followerCount non trouvé");
     }
   } catch (error) {
     console.error("[Compteur TikTok] Erreur:", error.message);
   }
 }
 
-async function updateAllCounters() {
-  for (const guild of client.guilds.cache.values()) {
-    await updateMemberCounters(guild);
-    await updateTikTokCounter(guild);
-  }
-}
-
 function startCounterInterval() {
-  updateAllCounters();
-  setInterval(updateAllCounters, COUNTER_INTERVAL_MS);
+  // Membres : mise à jour immédiate au démarrage + via events + toutes les 30s
+  for (const guild of client.guilds.cache.values()) {
+    updateMemberCounters(guild);
+  }
+
+  function tickMembers() {
+    for (const guild of client.guilds.cache.values()) {
+      updateMemberCounters(guild);
+    }
+  }
+  setInterval(tickMembers, MEMBER_INTERVAL_MS);
+
+  // TikTok : toutes les 30 secondes
+  function tickTikTok() {
+    for (const guild of client.guilds.cache.values()) {
+      updateTikTokCounter(guild);
+    }
+  }
+  tickTikTok();
+  setInterval(tickTikTok, TIKTOK_INTERVAL_MS);
 }
 
 // ======================================================
