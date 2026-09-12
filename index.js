@@ -101,9 +101,6 @@ const ADMIN_LOG_CHANNEL_NAME = "🚫-logs-admin";
 const ADMIN_LOG_CHANNEL_ID = "1548238551043543071";
 
 const CASE_FILE = "./cases.json";
-const TIKTOK_STATE_FILE = "./tiktok_state.json";
-// ⬇️ ID DU SALON POUR LES NOTIFICATIONS TIKTOK – Remplacez par le vrai ID du salon Discord
-const TIKTOK_NOTIFY_CHANNEL_ID = "1548231185015120054"; // 📺・tiktok
 
 const MAX_EMBED_FIELD = 1024;
 
@@ -181,34 +178,11 @@ async function updateMemberCounters(guild) {
 
 let tiktokFetching = false; // Protection anti-empilement
 
-// ─── Persistance du dernier videoCount connu ───
-function loadTikTokState() {
-  try {
-    if (fs.existsSync(TIKTOK_STATE_FILE)) {
-      return JSON.parse(fs.readFileSync(TIKTOK_STATE_FILE, "utf8"));
-    }
-  } catch (e) {
-    console.error("[TikTok State] Erreur lecture:", e.message);
-  }
-  return { lastVideoCount: null };
-}
-
-function saveTikTokState(state) {
-  try {
-    fs.writeFileSync(TIKTOK_STATE_FILE, JSON.stringify(state, null, 2));
-  } catch (e) {
-    console.error("[TikTok State] Erreur écriture:", e.message);
-  }
-}
-
-let tiktokState = loadTikTokState();
-
 async function updateTikTokCounter(guild) {
   if (tiktokFetching) return; // Une requête est déjà en cours, on attend
   tiktokFetching = true;
   const tiktokChannel = guild.channels.cache.get("1547260849830367334");
   if (!tiktokChannel) {
-    tiktokFetching = false;
     return;
   }
 
@@ -242,80 +216,13 @@ async function updateTikTokCounter(guild) {
       }).on("error", reject);
     });
 
-    // ─── Abonnés TikTok ───
-    const matchFollower = html.match(/"followerCount":(\d+)/);
-    const followers = matchFollower ? parseInt(matchFollower[1], 10) : null;
+    const match = html.match(/"followerCount":(\d+)/);
+    const followers = match ? parseInt(match[1], 10) : null;
 
     if (followers !== null) {
       enqueueCounterUpdate("1547260849830367334", `👥 Abonnés Tiktok : ${followers}`);
     } else {
       console.error("[Compteur TikTok] followerCount non trouvé");
-    }
-
-    // ─── Détection nouveau TikTok ───
-    const matchVideo = html.match(/"videoCount":(\d+)/);
-    const videoCount = matchVideo ? parseInt(matchVideo[1], 10) : null;
-
-    if (videoCount !== null) {
-      const previousCount = tiktokState.lastVideoCount;
-
-      // Premier lancement : on initialise sans notifier
-      if (previousCount === null) {
-        console.log(`[TikTok] Premier lancement – videoCount initialisé à ${videoCount}`);
-        tiktokState.lastVideoCount = videoCount;
-        saveTikTokState(tiktokState);
-      }
-      // Nouvelle vidéo détectée !
-      else if (videoCount > previousCount) {
-        const newVideos = videoCount - previousCount;
-        console.log(`[TikTok] 🎬 ${newVideos} nouvelle(s) vidéo(s) détectée(s) ! (${previousCount} → ${videoCount})`);
-
-        // Mettre à jour l'état AVANT d'envoyer la notif
-        tiktokState.lastVideoCount = videoCount;
-        saveTikTokState(tiktokState);
-
-        // Envoyer la notification si le canal est configuré
-        if (TIKTOK_NOTIFY_CHANNEL_ID) {
-          try {
-            const notifyChannel = guild.channels.cache.get(TIKTOK_NOTIFY_CHANNEL_ID)
-              || await guild.channels.fetch(TIKTOK_NOTIFY_CHANNEL_ID).catch(() => null);
-
-            if (notifyChannel) {
-              const embed = new EmbedBuilder()
-                .setColor(0x000000) // Noir – couleurs TikTok
-                .setTitle("🎬 Nouveau TikTok !")
-                .setDescription(
-                  `Nouveau TikTok à regarder dès maintenant !\n\n` +
-                  `👉 [Voir le TikTok de 『ZenyXx』](https://www.tiktok.com/@${username})`
-                )
-                .setThumbnail("https://cdn.discordapp.com/emojis/1351628959725826218.png")
-                .setFooter({ text: `@${username} • TikTok`, iconURL: "https://assets.tiktokcdn.com/tos-maliva-avt-0068/7c5f84e8ea9a2a6c0865c7a2a55b5e25" })
-                .setTimestamp();
-
-              await notifyChannel.send({
-                content: "@everyone Nouveau TikTok à regarder dès maintenant !",
-                embeds: [embed]
-              });
-              console.log("[TikTok] Notification envoyée avec succès !");
-            } else {
-              console.warn(`[TikTok] Canal de notification introuvable (ID: ${TIKTOK_NOTIFY_CHANNEL_ID})`);
-            }
-          } catch (notifErr) {
-            console.error("[TikTok] Erreur envoi notification:", notifErr.message);
-          }
-        } else {
-          console.warn("[TikTok] TIKTOK_NOTIFY_CHANNEL_ID non configuré. Nouvelle vidéo non notifiée.");
-        }
-      }
-      // videoCount inchangé
-      else if (videoCount < previousCount) {
-        // Cas rare : vidéo supprimée → on met à jour sans notifier
-        console.log(`[TikTok] videoCount a diminué (${previousCount} → ${videoCount}), mise à jour silencieuse.`);
-        tiktokState.lastVideoCount = videoCount;
-        saveTikTokState(tiktokState);
-      }
-    } else {
-      console.error("[Compteur TikTok] videoCount non trouvé dans le HTML");
     }
   } catch (error) {
     console.error("[Compteur TikTok] Erreur:", error.message);
@@ -355,8 +262,9 @@ function startCounterInterval() {
 // 🔉 • Créer ta vocal duo → 2 places
 // 🔉 • Créer ta vocal trio → 3 places
 const VOCAL_HUBS = {
-  "1547964402118959214": 2,
-  "1547943285010472991": 3
+  "1547964402118959214": 2,  // Duo (2 membres)
+  "1547943285010472991": 3,  // Trio (3 membres)
+  "1548370295444869261": 0   // Privée (illimité)
 };
 
 // Stockage en mémoire : channelId -> { ownerId, hubType, locked, hidden, blockedUsers, panelMessageId }
@@ -406,8 +314,9 @@ function buildVoiceControlPanel(channel, owner) {
   const isLocked = info?.locked || false;
   const isHidden = info?.hidden || false;
   const hubType = info?.hubType || 2;
-  const limit = channel.userLimit || hubType;
+  const limit = channel.userLimit !== undefined && channel.userLimit !== null ? channel.userLimit : hubType;
 
+  const limitDisplay = limit === 0 ? "Illimité" : `${limit}`;
   const embed = new EmbedBuilder()
     .setTitle("🔊 Panneau de contrôle du salon")
     .setColor(0x5865F2)
@@ -420,6 +329,11 @@ function buildVoiceControlPanel(channel, owner) {
       {
         name: "Propriétaire :",
         value: `<@${owner.id}>`,
+        inline: true
+      },
+      {
+        name: "Limite :",
+        value: `👤 ${limitDisplay}`,
         inline: true
       }
     )
@@ -532,7 +446,7 @@ async function createPrivateVoiceChannel(member, hubChannel) {
   const category = hubChannel.parent;
 
   // Créer le nom du salon
-  const typeLabel = hubType === 2 ? "👥・Duo" : "👥・Trio";
+  const typeLabel = hubType === 0 ? "👥・Privée" : hubType === 2 ? "👥・Duo" : "👥・Trio";
   const channelName = `${typeLabel} de ${member.user.username}`;
 
   // Permissions : privé par défaut
@@ -768,7 +682,7 @@ async function sendLog(
   color = 0x5865F2,
   channelId = null
 ) {
-  let channel =
+  const channel =
     channelId
       ? guild.channels.cache.get(channelId)
       : getLogChannel(
@@ -776,16 +690,7 @@ async function sendLog(
           channelName
         );
 
-  if (!channel && channelId) {
-    try {
-      channel = await guild.channels.fetch(channelId);
-    } catch (e) {
-      console.error(`[sendLog] Impossible de fetch le salon ${channelId}:`, e.message);
-    }
-  }
-
   if (!channel) {
-    console.warn(`[sendLog] Salon introuvable – nom: "${channelName}", id: ${channelId}`);
     return;
   }
 
@@ -1449,138 +1354,6 @@ async function sendModerationLog({
   }).catch(() => {});
 
   return caseNumber;
-}
-
-
-// ======================================================
-// DM DE SANCTION
-// ======================================================
-
-async function sendSanctionDM({
-  user,
-  guild,
-  type,
-  moderator,
-  reason = "Aucune raison fournie",
-  duration = null,
-  expires = null,
-  caseNumber = null
-}) {
-
-  const typeLabels = {
-    warn: "avertissement",
-    kick: "exclusion",
-    ban: "bannissement définitif",
-    tempban: "bannissement temporaire",
-    timeout: "exclusion (timeout)",
-    unban: "débannissement",
-    "timeout-remove": "fin de timeout",
-    clearwarnings: "retrait d'avertissements",
-    untimeout: "fin de timeout"
-  };
-
-  const label =
-    typeLabels[type] ||
-    type;
-
-  const embed =
-    new EmbedBuilder()
-      .setTitle("Sanction")
-      .setColor(0x5865F2)
-      .setDescription(
-        "Vous avez reçu un " +
-        label +
-        " sur le serveur " +
-        guild.name +
-        " !"
-      )
-      .addFields(
-        {
-          name:
-            "🛡️ Modérateur",
-
-          value:
-            moderator
-              ? moderator.tag +
-                " (" +
-                moderator.toString() +
-                ")"
-              : "Inconnu",
-
-          inline:
-            false
-        },
-
-        {
-          name:
-            "📝 Raison",
-
-          value:
-            cleanText(
-              reason
-            ),
-
-          inline:
-            false
-        }
-      );
-
-  if (duration) {
-
-    embed.addFields({
-      name:
-        "⏱️ Durée",
-
-      value:
-        duration,
-
-      inline:
-        true
-    });
-  }
-
-  if (expires) {
-
-    embed.addFields({
-      name:
-        "📅 Expire le",
-
-      value:
-        formatDiscordDate(
-          expires
-        ),
-
-      inline:
-        true
-    });
-  }
-
-  if (caseNumber) {
-
-    embed.setFooter({
-      text:
-        "Case #" +
-        caseNumber
-    });
-  }
-
-  embed.setTimestamp();
-
-  try {
-
-    await user.send({
-      embeds:
-        [embed]
-    });
-  } catch (err) {
-
-    console.warn(
-      "[sendSanctionDM] Impossible d'envoyer un DM à " +
-      user.tag +
-      " :",
-      err.message
-    );
-  }
 }
 
 
@@ -3092,50 +2865,6 @@ const commands = [
     ),
 
 
-  // UNTIMEOUT
-  new SlashCommandBuilder()
-
-    .setName(
-      "untimeout"
-    )
-
-    .setDescription(
-      "Retire le timeout d'un membre"
-    )
-
-    .addUserOption(
-      o =>
-        o
-          .setName(
-            "membre"
-          )
-          .setDescription(
-            "Le membre dont retirer le timeout"
-          )
-          .setRequired(
-            true
-          )
-    )
-
-    .addStringOption(
-      o =>
-        o
-          .setName(
-            "raison"
-          )
-          .setDescription(
-            "Raison du retrait de timeout"
-          )
-          .setRequired(
-            false
-          )
-    )
-
-    .setDefaultMemberPermissions(
-      PermissionFlagsBits.ModerateMembers
-    ),
-
-
   // CASE
   new SlashCommandBuilder()
 
@@ -3380,8 +3109,7 @@ client.on(
           `👢 **${target.tag}** a été expulsé.`
         );
 
-        const kickCase =
-          await sendModerationLog({
+        await sendModerationLog({
 
           guild,
 
@@ -3403,15 +3131,6 @@ client.on(
           reason,
 
           proof
-        });
-
-        await sendSanctionDM({
-          user: target,
-          guild,
-          type: "kick",
-          moderator: member.user,
-          reason,
-          caseNumber: kickCase
         });
 
         return;
@@ -3483,8 +3202,7 @@ client.on(
           `🔨 **${target.tag}** a été banni définitivement.`
         );
 
-        const banCase =
-          await sendModerationLog({
+        await sendModerationLog({
 
           guild,
 
@@ -3506,15 +3224,6 @@ client.on(
           reason,
 
           proof
-        });
-
-        await sendSanctionDM({
-          user: target,
-          guild,
-          type: "ban",
-          moderator: member.user,
-          reason,
-          caseNumber: banCase
         });
 
         return;
@@ -3624,8 +3333,7 @@ client.on(
           `⏳ **${target.tag}** a été banni pendant **${formatDuration(durationMs)}**.`
         );
 
-        const tempbanCase =
-          await sendModerationLog({
+        await sendModerationLog({
 
           guild,
 
@@ -3657,17 +3365,6 @@ client.on(
             ),
 
           proof
-        });
-
-        await sendSanctionDM({
-          user: target,
-          guild,
-          type: "tempban",
-          moderator: member.user,
-          reason,
-          duration: formatDuration(durationMs),
-          expires: new Date(expiresAt),
-          caseNumber: tempbanCase
         });
 
         return;
@@ -3790,8 +3487,7 @@ client.on(
           `⏳ **${target.tag}** a été exclu pendant **${formatDuration(durationMs)}**.`
         );
 
-        const timeoutCase =
-          await sendModerationLog({
+        await sendModerationLog({
 
           guild,
 
@@ -3823,17 +3519,6 @@ client.on(
             ),
 
           proof
-        });
-
-        await sendSanctionDM({
-          user: target,
-          guild,
-          type: "timeout",
-          moderator: member.user,
-          reason,
-          duration: formatDuration(durationMs),
-          expires: new Date(expiresAt),
-          caseNumber: timeoutCase
         });
 
         return;
@@ -3908,15 +3593,6 @@ client.on(
         await interaction.reply(
           `⚠️ **${target.tag}** a reçu un avertissement. (Warn #${warningsBefore + 1})`
         );
-
-        await sendSanctionDM({
-          user: target,
-          guild,
-          type: "warn",
-          moderator: member.user,
-          reason,
-          caseNumber
-        });
 
         const channel =
           getLogChannel(
@@ -4212,14 +3888,6 @@ client.on(
           0x57F287
         );
 
-        await sendSanctionDM({
-          user: target,
-          guild,
-          type: "clearwarnings",
-          moderator: member.user,
-          reason: count + " avertissement(s) supprimé(s)"
-        });
-
         return;
       }
 
@@ -4304,8 +3972,7 @@ client.on(
           `🔓 **${user.tag}** a été débanni.`
         );
 
-        const unbanCase =
-          await sendModerationLog({
+        await sendModerationLog({
 
           guild,
 
@@ -4327,126 +3994,13 @@ client.on(
           reason
         });
 
-        await sendSanctionDM({
-          user,
-          guild,
-          type: "unban",
-          moderator: member.user,
-          reason,
-          caseNumber: unbanCase
-        });
-
-        return;
-      }
-
-
-      // ================================================
-      // UNTIMEOUT
-      // ================================================
-
-      if (
-        commandName ===
-        "untimeout"
-      ) {
-
-        const target =
-          options.getUser(
-            "membre"
-          );
-
-        const reason =
-          options.getString(
-            "raison"
-          ) ||
-          "Aucune raison fournie";
-
-        const targetMember =
-          await guild.members
-            .fetch(
-              target.id
-            )
-            .catch(
-              () => null
-            );
-
-        if (!targetMember) {
-
-          return interaction.reply({
-            content:
-              "❌ Membre introuvable.",
-
-            ephemeral:
-              true
-          });
-        }
-
-        if (
-          !targetMember.communicationDisabledUntilTimestamp
-        ) {
-
-          return interaction.reply({
-            content:
-              "ℹ️ Ce membre n'est pas en timeout.",
-
-            ephemeral:
-              true
-          });
-        }
-
-        markBotAction(
-          guild.id,
-          target.id,
-          "timeout"
-        );
-
-        await targetMember.timeout(
-          null,
-          reason
-        );
-
-        await interaction.reply(
-          `🔓 **${target.tag}** n'est plus en timeout.`
-        );
-
-        const untimeoutCase =
-          await sendModerationLog({
-
-          guild,
-
-          title:
-            "🔓 Fin de timeout",
-
-          color:
-            0x57F287,
-
-          type:
-            "untimeout",
-
-          memberUser:
-            target,
-
-          moderator:
-            member.user,
-
-          reason
-        });
-
-        await sendSanctionDM({
-          user: target,
-          guild,
-          type: "untimeout",
-          moderator: member.user,
-          reason,
-          caseNumber: untimeoutCase
-        });
-
         return;
       }
 
 
       // ================================================
       // CASE
-      // ============================================================
+      // ================================================
 
       if (
         commandName ===
@@ -5309,13 +4863,13 @@ client.on(
               "vc_limit_input"
             )
             .setLabel(
-              "Nombre maximum de membres (1-99)"
+              "Nombre maximum de membres (0-99, 0 = illimité)"
             )
             .setStyle(
               TextInputStyle.Short
             )
             .setPlaceholder(
-              "2"
+              "0"
             )
             .setRequired(true)
             .setMinLength(1)
@@ -5930,12 +5484,12 @@ client.on(
 
         if (
           isNaN(limit) ||
-          limit < 1 ||
+          limit < 0 ||
           limit > 99
         ) {
           await interaction.reply({
             content:
-              "❌ La limite doit être un nombre entre 1 et 99.",
+              "❌ La limite doit être un nombre entre 0 et 99 (0 = illimité).",
             ephemeral: true
           });
           return;
@@ -5945,9 +5499,10 @@ client.on(
           limit
         );
 
+        const limitDisplay = limit === 0 ? "Illimité" : `${limit}`;
         await interaction.reply({
           content:
-            `👥 Limite définie à : **${limit}**`,
+            `👥 Limite définie à : **${limitDisplay}**`,
           ephemeral: true
         });
 
@@ -6597,8 +6152,7 @@ client.on(
       wasKick
     ) {
 
-      const kickAutoCase =
-        await sendModerationLog({
+      await sendModerationLog({
 
         guild:
           member.guild,
@@ -6626,15 +6180,6 @@ client.on(
           },
 
         reason
-      });
-
-      await sendSanctionDM({
-        user: member.user,
-        guild: member.guild,
-        type: "kick",
-        moderator: executor || { tag: "Inconnu", id: "Inconnu" },
-        reason,
-        caseNumber: kickAutoCase
       });
 
       return;
@@ -7050,14 +6595,6 @@ client.on(
         0x57F287
       );
 
-      await sendSanctionDM({
-        user: newMember.user,
-        guild: newMember.guild,
-        type: "timeout-remove",
-        moderator: executor || { tag: "Inconnu", id: "Inconnu" },
-        reason
-      });
-
       return;
     }
 
@@ -7134,8 +6671,7 @@ client.on(
       newTimeout -
       Date.now();
 
-    const timeoutAutoCase =
-      await sendModerationLog({
+    await sendModerationLog({
 
       guild:
         newMember.guild,
@@ -7171,17 +6707,6 @@ client.on(
 
       expires:
         expiresAt
-    });
-
-    await sendSanctionDM({
-      user: newMember.user,
-      guild: newMember.guild,
-      type: "timeout",
-      moderator: executor || { tag: "Inconnu", id: "Inconnu" },
-      reason,
-      duration: formatDuration(durationMs),
-      expires: expiresAt,
-      caseNumber: timeoutAutoCase
     });
   }
 );
@@ -7254,8 +6779,7 @@ client.on(
       );
     }
 
-    const banDirectCase =
-      await sendModerationLog({
+    await sendModerationLog({
 
       guild:
         ban.guild,
@@ -7283,15 +6807,6 @@ client.on(
         },
 
       reason
-    });
-
-    await sendSanctionDM({
-      user: ban.user,
-      guild: ban.guild,
-      type: "ban",
-      moderator: executor || { tag: "Inconnu", id: "Inconnu" },
-      reason,
-      caseNumber: banDirectCase
     });
   }
 );
@@ -7368,8 +6883,7 @@ client.on(
       );
     }
 
-    const unbanDirectCase =
-      await sendModerationLog({
+    await sendModerationLog({
 
       guild:
         ban.guild,
@@ -7397,15 +6911,6 @@ client.on(
         },
 
       reason
-    });
-
-    await sendSanctionDM({
-      user: ban.user,
-      guild: ban.guild,
-      type: "unban",
-      moderator: executor || { tag: "Inconnu", id: "Inconnu" },
-      reason,
-      caseNumber: unbanDirectCase
     });
   }
 );
@@ -8924,8 +8429,9 @@ client.on(
         }
       ],
       0x57F287,
+    null,
       ADMIN_LOG_CHANNEL_ID
-    );
+  );
   }
 );
 
@@ -8981,155 +8487,216 @@ client.on(
         }
       ],
       0xED4245,
+
+      null,
+
       ADMIN_LOG_CHANNEL_ID
-    );
+  );
   }
 );
 
 
 // ======================================================
-// WEBHOOKS (CRÉÉ / SUPPRIMÉ / MODIFIÉ)
-// Utilise guildAuditLogEntryCreate car les événements
-// webhookCreate/webhookDelete/webhookUpdate n'existent pas
-// dans discord.js v14
+// WEBHOOK CRÉÉ
 // ======================================================
 
 client.on(
-  "guildAuditLogEntryCreate",
-  async (auditLogEntry, guild) => {
+  "webhookCreate",
+  async webhook => {
 
-    // Filtrer uniquement les actions webhook
-    if (
-      auditLogEntry.action !== AuditLogEvent.WebhookCreate &&
-      auditLogEntry.action !== AuditLogEvent.WebhookDelete &&
-      auditLogEntry.action !== AuditLogEvent.WebhookUpdate
-    ) return;
+    if (!webhook.guild) return;
 
-    const executor = auditLogEntry.executor;
-    const target = auditLogEntry.target;
+    let executor = null;
 
-    if (auditLogEntry.action === AuditLogEvent.WebhookCreate) {
-      const changes = auditLogEntry.changes || [];
-      const nameChange = changes.find(c => c.key === "name");
-      const channelChange = changes.find(c => c.key === "channel_id");
-      const webhookName = nameChange?.new || "Inconnu";
-      const webhookChannel = channelChange?.new || null;
-
-      await sendLog(
-        guild,
-        "🪝 Webhook créé",
-        null,
-        ADMIN_LOG_CHANNEL_NAME,
-        [
-          {
-            name: "🪝 Webhook",
-            value: `\`${webhookName}\``,
-            inline: true
-          },
-          {
-            name: "📍 Salon",
-            value: webhookChannel ? `<#${webhookChannel}>` : "Inconnu",
-            inline: true
-          },
-          {
-            name: "🛡️ Créé par",
-            value: executor ? `${executor}` : "Inconnu",
-            inline: true
-          },
-          {
-            name: "🔗 ID",
-            value: target?.id ? `\`${target.id}\`` : "Inconnu",
-            inline: true
-          }
-        ],
-        0x57F287,
-        ADMIN_LOG_CHANNEL_ID
-      );
-    }
-
-    if (auditLogEntry.action === AuditLogEvent.WebhookDelete) {
-      const changes = auditLogEntry.changes || [];
-      const nameChange = changes.find(c => c.key === "name");
-      const channelChange = changes.find(c => c.key === "channel_id");
-      const webhookName = nameChange?.old || "Inconnu";
-      const webhookChannel = channelChange?.old || null;
-
-      await sendLog(
-        guild,
-        "🗑️ Webhook supprimé",
-        null,
-        ADMIN_LOG_CHANNEL_NAME,
-        [
-          {
-            name: "🪝 Webhook",
-            value: `\`${webhookName}\``,
-            inline: true
-          },
-          {
-            name: "📍 Salon",
-            value: webhookChannel ? `<#${webhookChannel}>` : "Inconnu",
-            inline: true
-          },
-          {
-            name: "🛡️ Supprimé par",
-            value: executor ? `${executor}` : "Inconnu",
-            inline: true
-          }
-        ],
-        0xED4245,
-        ADMIN_LOG_CHANNEL_ID
-      );
-    }
-
-    if (auditLogEntry.action === AuditLogEvent.WebhookUpdate) {
-      const changes = auditLogEntry.changes || [];
-      const nameChange = changes.find(c => c.key === "name");
-      const channelChange = changes.find(c => c.key === "channel_id");
-
-      const fields = [
-        {
-          name: "🪝 Webhook",
-          value: `\`${nameChange?.new || "Inconnu"}\``,
-          inline: false
-        }
-      ];
-
-      if (nameChange) {
-        fields.push({
-          name: "📝 Nom",
-          value: `Avant : \`${nameChange.old}\`
-Après : \`${nameChange.new}\``,
-          inline: false
-        });
-      }
-
-      if (channelChange) {
-        fields.push({
-          name: "📍 Salon",
-          value: `Avant : <#${channelChange.old}>
-Après : <#${channelChange.new}>`,
-          inline: false
-        });
-      }
-
-      fields.push({
-        name: "🛡️ Modifié par",
-        value: executor ? `${executor}` : "Inconnu",
-        inline: false
+    try {
+      const logs = await webhook.guild.fetchAuditLogs({
+        type: AuditLogEvent.WebhookCreate,
+        limit: 5
       });
 
-      await sendLog(
-        guild,
-        "✏️ Webhook modifié",
-        null,
-        ADMIN_LOG_CHANNEL_NAME,
-        fields,
-        0xFEE75C,
-        ADMIN_LOG_CHANNEL_ID
+      const entry = logs.entries.find(e =>
+        e.target?.id === webhook.id &&
+        Date.now() - e.createdTimestamp < 15000
       );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (webhook créé) :", error);
     }
+
+    await sendLog(
+      webhook.guild,
+      "🪝 Webhook créé",
+      null,
+      ADMIN_LOG_CHANNEL_NAME,
+      [
+        {
+          name: "🪝 Webhook",
+          value: `\`${webhook.name}\``,
+          inline: true
+        },
+        {
+          name: "📍 Salon",
+          value: webhook.channelId ? `<#${webhook.channelId}>` : "Inconnu",
+          inline: true
+        },
+        {
+          name: "🛡️ Créé par",
+          value: executor ? `${executor}` : "Inconnu",
+          inline: true
+        },
+        {
+          name: "🔗 ID",
+          value: `\`${webhook.id}\``,
+          inline: true
+        }
+      ],
+      0x57F287,
+
+      null,
+
+      ADMIN_LOG_CHANNEL_ID
+  );
   }
 );
+
+
+// ======================================================
+// WEBHOOK SUPPRIMÉ
+// ======================================================
+
+client.on(
+  "webhookDelete",
+  async webhook => {
+
+    if (!webhook.guild) return;
+
+    let executor = null;
+
+    try {
+      const logs = await webhook.guild.fetchAuditLogs({
+        type: AuditLogEvent.WebhookDelete,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        e.target?.id === webhook.id &&
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (webhook supprimé) :", error);
+    }
+
+    await sendLog(
+      webhook.guild,
+      "🗑️ Webhook supprimé",
+      null,
+      ADMIN_LOG_CHANNEL_NAME,
+      [
+        {
+          name: "🪝 Webhook",
+          value: `\`${webhook.name}\``,
+          inline: true
+        },
+        {
+          name: "📍 Salon",
+          value: webhook.channelId ? `<#${webhook.channelId}>` : "Inconnu",
+          inline: true
+        },
+        {
+          name: "🛡️ Supprimé par",
+          value: executor ? `${executor}` : "Inconnu",
+          inline: true
+        }
+      ],
+      0xED4245,
+
+      null,
+
+      ADMIN_LOG_CHANNEL_ID
+  );
+  }
+);
+
+
+// ======================================================
+// WEBHOOK MODIFIÉ
+// ======================================================
+
+client.on(
+  "webhookUpdate",
+  async (oldWebhook, newWebhook) => {
+
+    if (!newWebhook.guild) return;
+
+    if (oldWebhook.name === newWebhook.name &&
+        oldWebhook.channelId === newWebhook.channelId) return;
+
+    let executor = null;
+
+    try {
+      const logs = await newWebhook.guild.fetchAuditLogs({
+        type: AuditLogEvent.WebhookUpdate,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        e.target?.id === newWebhook.id &&
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (webhook modifié) :", error);
+    }
+
+    const changes = [
+      {
+        name: "🪝 Webhook",
+        value: `\`${newWebhook.name}\``,
+        inline: false
+      }
+    ];
+
+    if (oldWebhook.name !== newWebhook.name) {
+      changes.push({
+        name: "📝 Nom",
+        value: `Avant : \`${oldWebhook.name}\`\nAprès : \`${newWebhook.name}\``,
+        inline: false
+      });
+    }
+
+    if (oldWebhook.channelId !== newWebhook.channelId) {
+      changes.push({
+        name: "📍 Salon",
+        value: `Avant : <#${oldWebhook.channelId}>\nAprès : <#${newWebhook.channelId}>`,
+        inline: false
+      });
+    }
+
+    changes.push({
+      name: "🛡️ Modifié par",
+      value: executor ? `${executor}` : "Inconnu",
+      inline: false
+    });
+
+    await sendLog(
+      newWebhook.guild,
+      "✏️ Webhook modifié",
+      null,
+      ADMIN_LOG_CHANNEL_NAME,
+      changes,
+      0xFEE75C,
+
+      null,
+
+      ADMIN_LOG_CHANNEL_ID
+  );
+  }
+);
+
 
 // ======================================================
 // SERVEUR MODIFIÉ
@@ -9246,8 +8813,11 @@ client.on(
       ADMIN_LOG_CHANNEL_NAME,
       changes,
       0xFEE75C,
+
+      null,
+
       ADMIN_LOG_CHANNEL_ID
-    );
+  );
   }
 );
 
@@ -9319,8 +8889,9 @@ client.on(
         }
       ],
       0x57F287,
+    null,
       ADMIN_LOG_CHANNEL_ID
-    );
+  );
   }
 );
 
@@ -9387,8 +8958,11 @@ client.on(
         }
       ],
       0xED4245,
+
+      null,
+
       ADMIN_LOG_CHANNEL_ID
-    );
+  );
   }
 );
 
@@ -9481,8 +9055,11 @@ client.on(
       ADMIN_LOG_CHANNEL_NAME,
       changes,
       0xFEE75C,
+
+      null,
+
       ADMIN_LOG_CHANNEL_ID
-    );
+  );
   }
 );
 
