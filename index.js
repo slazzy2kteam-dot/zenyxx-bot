@@ -315,17 +315,19 @@ const TIKTOK_NOTIFY_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 
 let tiktokLastVideoId = null;
 
-// Récupérer l'ID de la dernière vidéo TikTok
+// Récupérer l'ID de la dernière vidéo TikTok via la page embed
+// (la page profile classique ne contient pas les IDs dans le HTML
+//  car les vidéos sont chargées côté client via JS)
 async function fetchLatestTikTokVideoId() {
   const username = TIKTOK_NOTIFY_USERNAME;
   try {
-    const url = `https://www.tiktok.com/@${username}`;
+    const url = `https://www.tiktok.com/embed/@${username}`;
     const html = await new Promise((resolve, reject) => {
       httpsModule.get(url, {
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9,fr-FR;q=0.8"
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9"
         }
       }, res => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -347,18 +349,10 @@ async function fetchLatestTikTokVideoId() {
       }).on("error", reject);
     });
 
-    // Chercher les IDs de vidéos dans le JSON embeded de la page
-    const videoIdMatches = html.match(/"id":"(\\d{10,})"/g);
-    if (videoIdMatches && videoIdMatches.length > 0) {
-      // Extraire le premier ID (vidéo la plus récente)
-      const idMatch = videoIdMatches[0].match(/"id":"(\\d{10,})"/);
-      return idMatch ? idMatch[1] : null;
-    }
-
-    // Alternative : chercher dans les URLs de vidéos
-    const urlMatches = html.match(/video\/(\\d{10,})/g);
+    // Chercher les IDs de vidéos dans les URLs : video/7684717468039908631
+    const urlMatches = html.match(/video\/(\d{10,})/g);
     if (urlMatches && urlMatches.length > 0) {
-      const idMatch = urlMatches[0].match(/video\/(\\d{10,})/);
+      const idMatch = urlMatches[0].match(/video\/(\d{10,})/);
       return idMatch ? idMatch[1] : null;
     }
 
