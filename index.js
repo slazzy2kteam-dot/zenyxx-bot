@@ -125,7 +125,10 @@ async function updateMemberCounters(guild) {
 
 async function updateTikTokCounter(guild) {
   const tiktokChannel = guild.channels.cache.get("1547260849830367334");
-  if (!tiktokChannel || !tiktokChannel.isVoiceBased()) return;
+  if (!tiktokChannel || !tiktokChannel.isVoiceBased()) {
+    console.log("[Compteur TikTok] Salon non trouvé ou pas vocal");
+    return;
+  }
 
   const username = "aetherofficiel";
   try {
@@ -133,26 +136,52 @@ async function updateTikTokCounter(guild) {
     const html = await new Promise((resolve, reject) => {
       httpsModule.get(url, {
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Accept-Language": "en-US,en;q=0.9"
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9,fr-FR;q=0.8",
+          "Cache-Control": "no-cache",
+          "Pragma": "no-cache"
         }
       }, res => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          httpsModule.get(res.headers.location, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+              "Accept-Language": "en-US,en;q=0.9"
+            }
+          }, res2 => {
+            let body = "";
+            res2.on("data", chunk => body += chunk);
+            res2.on("end", () => resolve(body));
+          }).on("error", reject);
+          return;
+        }
         let body = "";
         res.on("data", chunk => body += chunk);
         res.on("end", () => resolve(body));
       }).on("error", reject);
     });
 
+    console.log(`[Compteur TikTok] Page récupérée, taille: ${html.length}`);
+
     const match = html.match(/"followerCount":(\d+)/);
     const followers = match ? parseInt(match[1], 10) : null;
+
+    console.log(`[Compteur TikTok] Followers trouvés: ${followers}`);
+
     if (followers !== null) {
       const newName = `👥 Abonnés Tiktok : ${followers}`;
+      console.log(`[Compteur TikTok] Nouveau nom: ${newName}, ancien: ${tiktokChannel.name}`);
       if (tiktokChannel.name !== newName) {
-        await tiktokChannel.setName(newName).catch(() => null);
+        await tiktokChannel.setName(newName).catch(err => {
+          console.error("[Compteur TikTok] Erreur setName:", err.message);
+        });
       }
+    } else {
+      console.error("[Compteur TikTok] Impossible de trouver followerCount dans la page");
     }
   } catch (error) {
-    console.error("Erreur récupération followers TikTok :", error.message);
+    console.error("[Compteur TikTok] Erreur:", error.message);
   }
 }
 
