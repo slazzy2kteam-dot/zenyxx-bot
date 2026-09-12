@@ -7072,7 +7072,8 @@ client.on(
 
     if (
       !channel.guild ||
-      channel.name?.startsWith("ticket-")
+      channel.name?.startsWith("ticket-") ||
+      channel.name?.startsWith("👥・")
     ) {
       return;
     }
@@ -7171,7 +7172,8 @@ client.on(
 
     if (
       !channel.guild ||
-      channel.name?.startsWith("ticket-")
+      channel.name?.startsWith("ticket-") ||
+      channel.name?.startsWith("👥・")
     ) {
       return;
     }
