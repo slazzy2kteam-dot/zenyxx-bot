@@ -7907,7 +7907,7 @@ client.on(
     if (oldRole.color !== newRole.color) {
       changes.push({
         name: "🎨 Couleur",
-        value: `Avant : ${oldRole.color === 0 ? "Aucune" : `#${oldRole.color.toString(16).padStart(6, "0")}`}\nAprès : ${newRole.color === 0 ? "Aucune" : `#${newRole.color.toString(16).padStart(6, "0")`)}`,
+        value: "Avant : " + (oldRole.color === 0 ? "Aucune" : `#${oldRole.color.toString(16).padStart(6, "0")}`) + "\nAprès : " + (newRole.color === 0 ? "Aucune" : `#${newRole.color.toString(16).padStart(6, "0")}`),
         inline: false
       });
     }
