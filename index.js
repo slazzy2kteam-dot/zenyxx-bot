@@ -672,13 +672,16 @@ async function sendLog(
   description,
   channelName = LOG_CHANNEL_NAME,
   fields = [],
-  color = 0x5865F2
+  color = 0x5865F2,
+  channelId = null
 ) {
   const channel =
-    getLogChannel(
-      guild,
-      channelName
-    );
+    channelId
+      ? guild.channels.cache.get(channelId)
+      : getLogChannel(
+          guild,
+          channelName
+        );
 
   if (!channel) {
     return;
@@ -8417,7 +8420,8 @@ client.on(
           inline: true
         }
       ],
-      0x57F287
+      0x57F287,
+      ADMIN_LOG_CHANNEL_ID
     );
   }
 );
@@ -8473,7 +8477,8 @@ client.on(
           inline: true
         }
       ],
-      0xED4245
+      0xED4245,
+      ADMIN_LOG_CHANNEL_ID
     );
   }
 );
@@ -8534,7 +8539,8 @@ client.on(
           inline: true
         }
       ],
-      0x57F287
+      0x57F287,
+      ADMIN_LOG_CHANNEL_ID
     );
   }
 );
@@ -8590,7 +8596,8 @@ client.on(
           inline: true
         }
       ],
-      0xED4245
+      0xED4245,
+      ADMIN_LOG_CHANNEL_ID
     );
   }
 );
@@ -8663,7 +8670,8 @@ client.on(
       null,
       ADMIN_LOG_CHANNEL_NAME,
       changes,
-      0xFEE75C
+      0xFEE75C,
+      ADMIN_LOG_CHANNEL_ID
     );
   }
 );
@@ -8783,7 +8791,8 @@ client.on(
       null,
       ADMIN_LOG_CHANNEL_NAME,
       changes,
-      0xFEE75C
+      0xFEE75C,
+      ADMIN_LOG_CHANNEL_ID
     );
   }
 );
@@ -8855,7 +8864,8 @@ client.on(
           inline: true
         }
       ],
-      0x57F287
+      0x57F287,
+      ADMIN_LOG_CHANNEL_ID
     );
   }
 );
@@ -8922,7 +8932,8 @@ client.on(
           inline: true
         }
       ],
-      0xED4245
+      0xED4245,
+      ADMIN_LOG_CHANNEL_ID
     );
   }
 );
@@ -9015,7 +9026,8 @@ client.on(
       null,
       ADMIN_LOG_CHANNEL_NAME,
       changes,
-      0xFEE75C
+      0xFEE75C,
+      ADMIN_LOG_CHANNEL_ID
     );
   }
 );
