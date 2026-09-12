@@ -107,6 +107,205 @@ const MAX_EMBED_FIELD = 1024;
 const httpsModule = require("https");
 
 // ======================================================
+// SYSTÈME NOTIFICATION TWITCH LIVE
+// ======================================================
+
+const TWITCH_CLIENT_ID = process.env.TWITCH_CLIENT_ID || "xclqtr46kv5pucivcndsnjflt39xhj";
+const TWITCH_CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET || "1wwnttex8byncuvkte5ylsx8vkw3ra";
+const TWITCH_USERNAME = "zenyxxtw";
+const TWITCH_NOTIFY_CHANNEL_ID = "1548388049669455972"; // 📺・twitch
+const TWITCH_CHECK_INTERVAL_MS = 60 * 1000; // 1 minute
+
+let twitchAccessToken = null;
+let twitchTokenExpiry = 0;
+let twitchWasLive = false;
+let twitchLiveMessageId = null;
+
+// Obtenir un token d'accès Twitch
+async function getTwitchToken() {
+  if (twitchAccessToken && Date.now() < twitchTokenExpiry) {
+    return twitchAccessToken;
+  }
+  return new Promise((resolve, reject) => {
+    const postData = new URLSearchParams({
+      client_id: TWITCH_CLIENT_ID,
+      client_secret: TWITCH_CLIENT_SECRET,
+      grant_type: "client_credentials"
+    }).toString();
+
+    const options = {
+      hostname: "id.twitch.tv",
+      path: "/oauth2/token",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(postData)
+      }
+    };
+
+    const req = httpsModule.request(options, res => {
+      let body = "";
+      res.on("data", chunk => body += chunk);
+      res.on("end", () => {
+        try {
+          const data = JSON.parse(body);
+          if (data.access_token) {
+            twitchAccessToken = data.access_token;
+            twitchTokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
+            console.log("[Twitch] Token obtenu, expire dans", data.expires_in, "secondes");
+            resolve(twitchAccessToken);
+          } else {
+            console.error("[Twitch] Erreur token:", body);
+            reject(new Error("Token non obtenu"));
+          }
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+
+    req.on("error", reject);
+    req.write(postData);
+    req.end();
+  });
+}
+
+// Vérifier si le streamer est en live
+async function checkTwitchLive(guild) {
+  let token;
+  try {
+    token = await getTwitchToken();
+  } catch (e) {
+    console.error("[Twitch] Impossible d'obtenir le token:", e.message);
+    return;
+  }
+
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: "api.twitch.tv",
+      path: "/helix/streams?user_login=" + encodeURIComponent(TWITCH_USERNAME),
+      method: "GET",
+      headers: {
+        "Client-Id": TWITCH_CLIENT_ID,
+        "Authorization": "Bearer " + token
+      }
+    };
+
+    const req = httpsModule.get(options, res => {
+      let body = "";
+      res.on("data", chunk => body += chunk);
+      res.on("end", () => {
+        try {
+          const data = JSON.parse(body);
+          const streams = data.data || [];
+          resolve(streams.length > 0 ? streams[0] : null);
+        } catch (e) {
+          console.error("[Twitch] Erreur parsing:", e.message);
+          resolve(null);
+        }
+      });
+    });
+
+    req.on("error", e => {
+      console.error("[Twitch] Erreur requête:", e.message);
+      resolve(null);
+    });
+  });
+}
+
+// Envoyer la notification de live
+async function sendTwitchLiveNotification(guild, stream) {
+  const channel = guild.channels.cache.get(TWITCH_NOTIFY_CHANNEL_ID);
+  if (!channel) {
+    console.error("[Twitch] Salon de notification introuvable");
+    return;
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle("🔴 ZenyXx est EN LIVE !")
+    .setURL(`https://www.twitch.tv/${TWITCH_USERNAME}`)
+    .setColor(0x9146FF)
+    .addFields(
+      { name: "🎬 Titre", value: stream.title || "Aucun titre", inline: false },
+      { name: "🎮 Jeu", value: stream.game_name || "Non spécifié", inline: true },
+      { name: "👥 Spectateurs", value: `${stream.viewer_count || 0}`, inline: true }
+    )
+    .setThumbnail(stream.thumbnail_url?.replace("{width}", "320").replace("{height}", "180") || null)
+    .setTimestamp();
+
+  const msg = await channel.send({
+    content: "@everyone 🔴 **ZenyXx vient de lancer son live !** Viens le regarder !\nhttps://www.twitch.tv/" + TWITCH_USERNAME,
+    embeds: [embed]
+  }).catch(() => null);
+
+  if (msg) {
+    twitchLiveMessageId = msg.id;
+  }
+}
+
+// Boucle de vérification Twitch
+async function twitchLiveLoop() {
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      const stream = await checkTwitchLive(guild);
+
+      if (stream && !twitchWasLive) {
+        // Viens de lancer le live
+        console.log("[Twitch] ZenyXx est en live !");
+        twitchWasLive = true;
+        await sendTwitchLiveNotification(guild, stream);
+      } else if (!stream && twitchWasLive) {
+        // Le live vient de se terminer
+        console.log("[Twitch] Le live est terminé");
+        twitchWasLive = false;
+
+        // Mettre à jour le message de notification
+        if (twitchLiveMessageId) {
+          const channel = guild.channels.cache.get(TWITCH_NOTIFY_CHANNEL_ID);
+          if (channel) {
+            const msg = await channel.messages.fetch(twitchLiveMessageId).catch(() => null);
+            if (msg) {
+              const updatedEmbed = EmbedBuilder.from(msg.embeds[0])
+                .setTitle("⚫ Le live est terminé")
+                .setColor(0x4F545C);
+              await msg.edit({
+                content: "~~@everyone~~ ⚫ **Le live de ZenyXx est terminé.** Merci d'avoir regardé !",
+                embeds: [updatedEmbed]
+              }).catch(() => {});
+            }
+          }
+          twitchLiveMessageId = null;
+        }
+      }
+      // Si le live continue, on met à jour le nombre de spectateurs
+      if (stream && twitchWasLive && twitchLiveMessageId) {
+        const channel = guild.channels.cache.get(TWITCH_NOTIFY_CHANNEL_ID);
+        if (channel) {
+          const msg = await channel.messages.fetch(twitchLiveMessageId).catch(() => null);
+          if (msg && msg.embeds[0]) {
+            const updatedEmbed = EmbedBuilder.from(msg.embeds[0])
+              .setFields(
+                { name: "🎬 Titre", value: stream.title || "Aucun titre", inline: false },
+                { name: "🎮 Jeu", value: stream.game_name || "Non spécifié", inline: true },
+                { name: "👥 Spectateurs", value: `${stream.viewer_count || 0}`, inline: true }
+              );
+            await msg.edit({ embeds: [updatedEmbed] }).catch(() => {});
+          }
+        }
+      }
+    } catch (e) {
+      console.error("[Twitch] Erreur dans la boucle:", e.message);
+    }
+  }
+}
+
+// Démarrer la boucle Twitch quand le bot est prêt
+function startTwitchLiveCheck() {
+  twitchLiveLoop();
+  setInterval(twitchLiveLoop, TWITCH_CHECK_INTERVAL_MS);
+}
+
+// ======================================================
 // COMPTEURS DE MEMBRES / ABONNÉS
 // ======================================================
 
@@ -2992,6 +3191,12 @@ client.once(
       startCounterInterval();
       console.log(
         "✅ Compteurs de membres / abonnés démarrés !"
+      );
+
+      // Démarrer la vérification Twitch live
+      startTwitchLiveCheck();
+      console.log(
+        "✅ Notifications Twitch live démarrées !"
       );
 
     } catch (error) {
