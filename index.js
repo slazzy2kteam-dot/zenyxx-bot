@@ -101,6 +101,9 @@ const ADMIN_LOG_CHANNEL_NAME = "🚫-logs-admin";
 const ADMIN_LOG_CHANNEL_ID = "1548238551043543071";
 
 const CASE_FILE = "./cases.json";
+const TIKTOK_STATE_FILE = "./tiktok_state.json";
+// ⬇️ ID DU SALON POUR LES NOTIFICATIONS TIKTOK – Remplacez par le vrai ID du salon Discord
+const TIKTOK_NOTIFY_CHANNEL_ID = "1548231185015120054"; // 📺・tiktok
 
 const MAX_EMBED_FIELD = 1024;
 
@@ -178,11 +181,34 @@ async function updateMemberCounters(guild) {
 
 let tiktokFetching = false; // Protection anti-empilement
 
+// ─── Persistance du dernier videoCount connu ───
+function loadTikTokState() {
+  try {
+    if (fs.existsSync(TIKTOK_STATE_FILE)) {
+      return JSON.parse(fs.readFileSync(TIKTOK_STATE_FILE, "utf8"));
+    }
+  } catch (e) {
+    console.error("[TikTok State] Erreur lecture:", e.message);
+  }
+  return { lastVideoCount: null };
+}
+
+function saveTikTokState(state) {
+  try {
+    fs.writeFileSync(TIKTOK_STATE_FILE, JSON.stringify(state, null, 2));
+  } catch (e) {
+    console.error("[TikTok State] Erreur écriture:", e.message);
+  }
+}
+
+let tiktokState = loadTikTokState();
+
 async function updateTikTokCounter(guild) {
   if (tiktokFetching) return; // Une requête est déjà en cours, on attend
   tiktokFetching = true;
   const tiktokChannel = guild.channels.cache.get("1547260849830367334");
   if (!tiktokChannel) {
+    tiktokFetching = false;
     return;
   }
 
@@ -216,13 +242,80 @@ async function updateTikTokCounter(guild) {
       }).on("error", reject);
     });
 
-    const match = html.match(/"followerCount":(\d+)/);
-    const followers = match ? parseInt(match[1], 10) : null;
+    // ─── Abonnés TikTok ───
+    const matchFollower = html.match(/"followerCount":(\d+)/);
+    const followers = matchFollower ? parseInt(matchFollower[1], 10) : null;
 
     if (followers !== null) {
       enqueueCounterUpdate("1547260849830367334", `👥 Abonnés Tiktok : ${followers}`);
     } else {
       console.error("[Compteur TikTok] followerCount non trouvé");
+    }
+
+    // ─── Détection nouveau TikTok ───
+    const matchVideo = html.match(/"videoCount":(\d+)/);
+    const videoCount = matchVideo ? parseInt(matchVideo[1], 10) : null;
+
+    if (videoCount !== null) {
+      const previousCount = tiktokState.lastVideoCount;
+
+      // Premier lancement : on initialise sans notifier
+      if (previousCount === null) {
+        console.log(`[TikTok] Premier lancement – videoCount initialisé à ${videoCount}`);
+        tiktokState.lastVideoCount = videoCount;
+        saveTikTokState(tiktokState);
+      }
+      // Nouvelle vidéo détectée !
+      else if (videoCount > previousCount) {
+        const newVideos = videoCount - previousCount;
+        console.log(`[TikTok] 🎬 ${newVideos} nouvelle(s) vidéo(s) détectée(s) ! (${previousCount} → ${videoCount})`);
+
+        // Mettre à jour l'état AVANT d'envoyer la notif
+        tiktokState.lastVideoCount = videoCount;
+        saveTikTokState(tiktokState);
+
+        // Envoyer la notification si le canal est configuré
+        if (TIKTOK_NOTIFY_CHANNEL_ID) {
+          try {
+            const notifyChannel = guild.channels.cache.get(TIKTOK_NOTIFY_CHANNEL_ID)
+              || await guild.channels.fetch(TIKTOK_NOTIFY_CHANNEL_ID).catch(() => null);
+
+            if (notifyChannel) {
+              const embed = new EmbedBuilder()
+                .setColor(0x000000) // Noir – couleurs TikTok
+                .setTitle("🎬 Nouveau TikTok !")
+                .setDescription(
+                  `Nouveau TikTok à regarder dès maintenant !\n\n` +
+                  `👉 [Voir le TikTok de 『ZenyXx』](https://www.tiktok.com/@${username})`
+                )
+                .setThumbnail("https://cdn.discordapp.com/emojis/1351628959725826218.png")
+                .setFooter({ text: `@${username} • TikTok`, iconURL: "https://assets.tiktokcdn.com/tos-maliva-avt-0068/7c5f84e8ea9a2a6c0865c7a2a55b5e25" })
+                .setTimestamp();
+
+              await notifyChannel.send({
+                content: "@everyone Nouveau TikTok à regarder dès maintenant !",
+                embeds: [embed]
+              });
+              console.log("[TikTok] Notification envoyée avec succès !");
+            } else {
+              console.warn(`[TikTok] Canal de notification introuvable (ID: ${TIKTOK_NOTIFY_CHANNEL_ID})`);
+            }
+          } catch (notifErr) {
+            console.error("[TikTok] Erreur envoi notification:", notifErr.message);
+          }
+        } else {
+          console.warn("[TikTok] TIKTOK_NOTIFY_CHANNEL_ID non configuré. Nouvelle vidéo non notifiée.");
+        }
+      }
+      // videoCount inchangé
+      else if (videoCount < previousCount) {
+        // Cas rare : vidéo supprimée → on met à jour sans notifier
+        console.log(`[TikTok] videoCount a diminué (${previousCount} → ${videoCount}), mise à jour silencieuse.`);
+        tiktokState.lastVideoCount = videoCount;
+        saveTikTokState(tiktokState);
+      }
+    } else {
+      console.error("[Compteur TikTok] videoCount non trouvé dans le HTML");
     }
   } catch (error) {
     console.error("[Compteur TikTok] Erreur:", error.message);
