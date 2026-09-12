@@ -1360,6 +1360,138 @@ async function sendModerationLog({
 
 
 // ======================================================
+// DM DE SANCTION
+// ======================================================
+
+async function sendSanctionDM({
+  user,
+  guild,
+  type,
+  moderator,
+  reason = "Aucune raison fournie",
+  duration = null,
+  expires = null,
+  caseNumber = null
+}) {
+
+  const typeLabels = {
+    warn: "avertissement",
+    kick: "exclusion",
+    ban: "bannissement définitif",
+    tempban: "bannissement temporaire",
+    timeout: "exclusion (timeout)",
+    unban: "débannissement",
+    "timeout-remove": "fin de timeout",
+    clearwarnings: "retrait d'avertissements",
+    untimeout: "fin de timeout"
+  };
+
+  const label =
+    typeLabels[type] ||
+    type;
+
+  const embed =
+    new EmbedBuilder()
+      .setTitle("Sanction")
+      .setColor(0x5865F2)
+      .setDescription(
+        "Vous avez reçu un " +
+        label +
+        " sur le serveur " +
+        guild.name +
+        " !"
+      )
+      .addFields(
+        {
+          name:
+            "🛡️ Modérateur",
+
+          value:
+            moderator
+              ? moderator.tag +
+                " (" +
+                moderator.toString() +
+                ")"
+              : "Inconnu",
+
+          inline:
+            false
+        },
+
+        {
+          name:
+            "📝 Raison",
+
+          value:
+            cleanText(
+              reason
+            ),
+
+          inline:
+            false
+        }
+      );
+
+  if (duration) {
+
+    embed.addFields({
+      name:
+        "⏱️ Durée",
+
+      value:
+        duration,
+
+      inline:
+        true
+    });
+  }
+
+  if (expires) {
+
+    embed.addFields({
+      name:
+        "📅 Expire le",
+
+      value:
+        formatDiscordDate(
+          expires
+        ),
+
+      inline:
+        true
+    });
+  }
+
+  if (caseNumber) {
+
+    embed.setFooter({
+      text:
+        "Case #" +
+        caseNumber
+    });
+  }
+
+  embed.setTimestamp();
+
+  try {
+
+    await user.send({
+      embeds:
+        [embed]
+    });
+  } catch (err) {
+
+    console.warn(
+      "[sendSanctionDM] Impossible d'envoyer un DM à " +
+      user.tag +
+      " :",
+      err.message
+    );
+  }
+}
+
+
+// ======================================================
 // IMAGE DE BIENVENUE
 // ======================================================
 
@@ -2867,6 +2999,50 @@ const commands = [
     ),
 
 
+  // UNTIMEOUT
+  new SlashCommandBuilder()
+
+    .setName(
+      "untimeout"
+    )
+
+    .setDescription(
+      "Retire le timeout d'un membre"
+    )
+
+    .addUserOption(
+      o =>
+        o
+          .setName(
+            "membre"
+          )
+          .setDescription(
+            "Le membre dont retirer le timeout"
+          )
+          .setRequired(
+            true
+          )
+    )
+
+    .addStringOption(
+      o =>
+        o
+          .setName(
+            "raison"
+          )
+          .setDescription(
+            "Raison du retrait de timeout"
+          )
+          .setRequired(
+            false
+          )
+    )
+
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.ModerateMembers
+    ),
+
+
   // CASE
   new SlashCommandBuilder()
 
@@ -3111,7 +3287,8 @@ client.on(
           `👢 **${target.tag}** a été expulsé.`
         );
 
-        await sendModerationLog({
+        const kickCase =
+          await sendModerationLog({
 
           guild,
 
@@ -3133,6 +3310,15 @@ client.on(
           reason,
 
           proof
+        });
+
+        await sendSanctionDM({
+          user: target,
+          guild,
+          type: "kick",
+          moderator: member.user,
+          reason,
+          caseNumber: kickCase
         });
 
         return;
@@ -3204,7 +3390,8 @@ client.on(
           `🔨 **${target.tag}** a été banni définitivement.`
         );
 
-        await sendModerationLog({
+        const banCase =
+          await sendModerationLog({
 
           guild,
 
@@ -3226,6 +3413,15 @@ client.on(
           reason,
 
           proof
+        });
+
+        await sendSanctionDM({
+          user: target,
+          guild,
+          type: "ban",
+          moderator: member.user,
+          reason,
+          caseNumber: banCase
         });
 
         return;
@@ -3335,7 +3531,8 @@ client.on(
           `⏳ **${target.tag}** a été banni pendant **${formatDuration(durationMs)}**.`
         );
 
-        await sendModerationLog({
+        const tempbanCase =
+          await sendModerationLog({
 
           guild,
 
@@ -3367,6 +3564,17 @@ client.on(
             ),
 
           proof
+        });
+
+        await sendSanctionDM({
+          user: target,
+          guild,
+          type: "tempban",
+          moderator: member.user,
+          reason,
+          duration: formatDuration(durationMs),
+          expires: new Date(expiresAt),
+          caseNumber: tempbanCase
         });
 
         return;
@@ -3489,7 +3697,8 @@ client.on(
           `⏳ **${target.tag}** a été exclu pendant **${formatDuration(durationMs)}**.`
         );
 
-        await sendModerationLog({
+        const timeoutCase =
+          await sendModerationLog({
 
           guild,
 
@@ -3521,6 +3730,17 @@ client.on(
             ),
 
           proof
+        });
+
+        await sendSanctionDM({
+          user: target,
+          guild,
+          type: "timeout",
+          moderator: member.user,
+          reason,
+          duration: formatDuration(durationMs),
+          expires: new Date(expiresAt),
+          caseNumber: timeoutCase
         });
 
         return;
@@ -3595,6 +3815,15 @@ client.on(
         await interaction.reply(
           `⚠️ **${target.tag}** a reçu un avertissement. (Warn #${warningsBefore + 1})`
         );
+
+        await sendSanctionDM({
+          user: target,
+          guild,
+          type: "warn",
+          moderator: member.user,
+          reason,
+          caseNumber
+        });
 
         const channel =
           getLogChannel(
@@ -3890,6 +4119,14 @@ client.on(
           0x57F287
         );
 
+        await sendSanctionDM({
+          user: target,
+          guild,
+          type: "clearwarnings",
+          moderator: member.user,
+          reason: count + " avertissement(s) supprimé(s)"
+        });
+
         return;
       }
 
@@ -3974,7 +4211,8 @@ client.on(
           `🔓 **${user.tag}** a été débanni.`
         );
 
-        await sendModerationLog({
+        const unbanCase =
+          await sendModerationLog({
 
           guild,
 
@@ -3996,13 +4234,126 @@ client.on(
           reason
         });
 
+        await sendSanctionDM({
+          user,
+          guild,
+          type: "unban",
+          moderator: member.user,
+          reason,
+          caseNumber: unbanCase
+        });
+
+        return;
+      }
+
+
+      // ================================================
+      // UNTIMEOUT
+      // ================================================
+
+      if (
+        commandName ===
+        "untimeout"
+      ) {
+
+        const target =
+          options.getUser(
+            "membre"
+          );
+
+        const reason =
+          options.getString(
+            "raison"
+          ) ||
+          "Aucune raison fournie";
+
+        const targetMember =
+          await guild.members
+            .fetch(
+              target.id
+            )
+            .catch(
+              () => null
+            );
+
+        if (!targetMember) {
+
+          return interaction.reply({
+            content:
+              "❌ Membre introuvable.",
+
+            ephemeral:
+              true
+          });
+        }
+
+        if (
+          !targetMember.communicationDisabledUntilTimestamp
+        ) {
+
+          return interaction.reply({
+            content:
+              "ℹ️ Ce membre n'est pas en timeout.",
+
+            ephemeral:
+              true
+          });
+        }
+
+        markBotAction(
+          guild.id,
+          target.id,
+          "timeout"
+        );
+
+        await targetMember.timeout(
+          null,
+          reason
+        );
+
+        await interaction.reply(
+          `🔓 **${target.tag}** n'est plus en timeout.`
+        );
+
+        const untimeoutCase =
+          await sendModerationLog({
+
+          guild,
+
+          title:
+            "🔓 Fin de timeout",
+
+          color:
+            0x57F287,
+
+          type:
+            "untimeout",
+
+          memberUser:
+            target,
+
+          moderator:
+            member.user,
+
+          reason
+        });
+
+        await sendSanctionDM({
+          user: target,
+          guild,
+          type: "untimeout",
+          moderator: member.user,
+          reason,
+          caseNumber: untimeoutCase
+        });
+
         return;
       }
 
 
       // ================================================
       // CASE
-      // ================================================
+      // ============================================================
 
       if (
         commandName ===
@@ -6153,7 +6504,8 @@ client.on(
       wasKick
     ) {
 
-      await sendModerationLog({
+      const kickAutoCase =
+        await sendModerationLog({
 
         guild:
           member.guild,
@@ -6181,6 +6533,15 @@ client.on(
           },
 
         reason
+      });
+
+      await sendSanctionDM({
+        user: member.user,
+        guild: member.guild,
+        type: "kick",
+        moderator: executor || { tag: "Inconnu", id: "Inconnu" },
+        reason,
+        caseNumber: kickAutoCase
       });
 
       return;
@@ -6596,6 +6957,14 @@ client.on(
         0x57F287
       );
 
+      await sendSanctionDM({
+        user: newMember.user,
+        guild: newMember.guild,
+        type: "timeout-remove",
+        moderator: executor || { tag: "Inconnu", id: "Inconnu" },
+        reason
+      });
+
       return;
     }
 
@@ -6672,7 +7041,8 @@ client.on(
       newTimeout -
       Date.now();
 
-    await sendModerationLog({
+    const timeoutAutoCase =
+      await sendModerationLog({
 
       guild:
         newMember.guild,
@@ -6708,6 +7078,17 @@ client.on(
 
       expires:
         expiresAt
+    });
+
+    await sendSanctionDM({
+      user: newMember.user,
+      guild: newMember.guild,
+      type: "timeout",
+      moderator: executor || { tag: "Inconnu", id: "Inconnu" },
+      reason,
+      duration: formatDuration(durationMs),
+      expires: expiresAt,
+      caseNumber: timeoutAutoCase
     });
   }
 );
@@ -6780,7 +7161,8 @@ client.on(
       );
     }
 
-    await sendModerationLog({
+    const banDirectCase =
+      await sendModerationLog({
 
       guild:
         ban.guild,
@@ -6808,6 +7190,15 @@ client.on(
         },
 
       reason
+    });
+
+    await sendSanctionDM({
+      user: ban.user,
+      guild: ban.guild,
+      type: "ban",
+      moderator: executor || { tag: "Inconnu", id: "Inconnu" },
+      reason,
+      caseNumber: banDirectCase
     });
   }
 );
@@ -6884,7 +7275,8 @@ client.on(
       );
     }
 
-    await sendModerationLog({
+    const unbanDirectCase =
+      await sendModerationLog({
 
       guild:
         ban.guild,
@@ -6912,6 +7304,15 @@ client.on(
         },
 
       reason
+    });
+
+    await sendSanctionDM({
+      user: ban.user,
+      guild: ban.guild,
+      type: "unban",
+      moderator: executor || { tag: "Inconnu", id: "Inconnu" },
+      reason,
+      caseNumber: unbanDirectCase
     });
   }
 );
