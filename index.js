@@ -4863,7 +4863,7 @@ client.on(
               "vc_limit_input"
             )
             .setLabel(
-              "Nombre maximum de membres (0-99, 0 = illimité)"
+              "Limite membres (0-99, 0=illimité)"
             )
             .setStyle(
               TextInputStyle.Short
