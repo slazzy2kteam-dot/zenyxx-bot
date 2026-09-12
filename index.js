@@ -49,7 +49,11 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildModeration,
-    GatewayIntentBits.GuildVoiceStates
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildWebhooks,
+    GatewayIntentBits.GuildInvites,
+    GatewayIntentBits.GuildEmojisAndStickers,
+    GatewayIntentBits.GuildScheduledEvents
   ],
   partials: [
     Partials.Message,
@@ -93,6 +97,8 @@ const WELCOME_CHANNEL_NAME = "🔨-arrivé-des-membres";
 const GOODBYE_CHANNEL_NAME = "✈️・𝗮𝘂𝗿𝗲𝘃𝗼𝗶𝗿";
 const PUBLIC_WELCOME_CHANNEL_NAME = "👋-bienvenue";
 const BOOST_CHANNEL_NAME = "🚀・boost";
+const ADMIN_LOG_CHANNEL_NAME = "🚫-logs-admin";
+const ADMIN_LOG_CHANNEL_ID = "1548238551043543071";
 
 const CASE_FILE = "./cases.json";
 
@@ -7425,6 +7431,170 @@ client.on(
 
 
 // ======================================================
+// SALON MODIFIÉ (changement de nom)
+// ======================================================
+
+client.on(
+  "channelUpdate",
+  async (oldChannel, newChannel) => {
+
+    if (
+      !newChannel.guild
+    ) {
+      return;
+    }
+
+    // Ignorer si le nom n'a pas changé
+    if (
+      oldChannel.name === newChannel.name
+    ) {
+      return;
+    }
+
+    // Exclure les salons de compteurs (mise à jour automatique du bot)
+    if (
+      COUNTER_CHANNELS[newChannel.id]
+    ) {
+      return;
+    }
+
+    // Exclure les tickets et vocales privées
+    if (
+      newChannel.name?.startsWith("ticket-") ||
+      newChannel.name?.startsWith("👥・")
+    ) {
+      return;
+    }
+
+    // Exclure les salons privés (staff) : seuls les salons publics sont logués
+    const isPublic =
+      newChannel
+        .permissionsFor(
+          newChannel.guild.roles.everyone
+        )
+        ?.has(
+          PermissionFlagsBits.ViewChannel
+        );
+
+    if (!isPublic) {
+      return;
+    }
+
+    let executor =
+      null;
+
+    try {
+
+      const logs =
+        await newChannel.guild.fetchAuditLogs({
+
+          type:
+            AuditLogEvent.ChannelUpdate,
+
+          limit:
+            5
+        });
+
+      const entry =
+        logs.entries.find(
+          e =>
+
+            e.target?.id ===
+              newChannel.id &&
+
+            Date.now() -
+              e.createdTimestamp <
+              15000
+        );
+
+      if (entry) {
+
+        executor =
+          entry.executor;
+      }
+
+    } catch (error) {
+
+      console.error(
+        "Impossible de lire les logs d'audit (salon modifié) :",
+        error
+      );
+    }
+
+    // Exclure les modifications faites par le bot lui-même
+    if (
+      executor &&
+      executor.id === client.user.id
+    ) {
+      return;
+    }
+
+    await sendLog(
+
+      newChannel.guild,
+
+      "✏️ Salon renommé",
+
+      null,
+
+      LOG_CHANNEL_NAME,
+
+      [
+
+        {
+          name:
+            "📍 Salon",
+
+          value:
+            `${newChannel}`,
+
+          inline:
+            false
+        },
+
+        {
+          name:
+            "📝 Ancien nom",
+
+          value:
+            `\`${oldChannel.name}\``,
+
+          inline:
+            true
+        },
+
+        {
+          name:
+            "📝 Nouveau nom",
+
+          value:
+            `\`${newChannel.name}\``,
+
+          inline:
+            true
+        },
+
+        {
+          name:
+            "🛡️ Renommé par",
+
+          value:
+            executor
+              ? `${executor}`
+              : "Inconnu",
+
+          inline:
+            false
+        }
+      ],
+
+      0xFEE75C
+    );
+  }
+);
+
+
+// ======================================================
 // RÔLE CRÉÉ
 // ======================================================
 
@@ -7708,6 +7878,1222 @@ client.on(
         [embed]
     }).catch(
       () => {}
+    );
+  }
+);
+
+
+// ======================================================
+// RÔLE MODIFIÉ
+// ======================================================
+
+client.on(
+  "roleUpdate",
+  async (oldRole, newRole) => {
+
+    if (!newRole.guild) return;
+
+    // Vérifier ce qui a changé
+    const changes = [];
+
+    if (oldRole.name !== newRole.name) {
+      changes.push({
+        name: "📝 Nom",
+        value: `Avant : \`${oldRole.name}\`\nAprès : \`${newRole.name}\``,
+        inline: false
+      });
+    }
+
+    if (oldRole.color !== newRole.color) {
+      changes.push({
+        name: "🎨 Couleur",
+        value: `Avant : ${oldRole.color === 0 ? "Aucune" : `#${oldRole.color.toString(16).padStart(6, "0")}`}\nAprès : ${newRole.color === 0 ? "Aucune" : `#${newRole.color.toString(16).padStart(6, "0")`)}`,
+        inline: false
+      });
+    }
+
+    if (oldRole.hoist !== newRole.hoist) {
+      changes.push({
+        name: "📌 Affiché séparément",
+        value: newRole.hoist ? "✅ Oui" : "❌ Non",
+        inline: true
+      });
+    }
+
+    if (oldRole.mentionable !== newRole.mentionable) {
+      changes.push({
+        name: "@ Mentionnable",
+        value: newRole.mentionable ? "✅ Oui" : "❌ Non",
+        inline: true
+      });
+    }
+
+    if (oldRole.permissions.bitfield !== newRole.permissions.bitfield) {
+      const addedPerms = newRole.permissions.missing(oldRole.permissions);
+      const removedPerms = oldRole.permissions.missing(newRole.permissions);
+      let permText = "";
+      if (addedPerms.length) permText += `✅ Ajoutées : ${addedPerms.map(p => `\`${p}\``).join(", ")}\n`;
+      if (removedPerms.length) permText += `❌ Retirées : ${removedPerms.map(p => `\`${p}\``).join(", ")})}`;
+      changes.push({
+        name: "🔐 Permissions",
+        value: permText || "Aucun changement détecté",
+        inline: false
+      });
+    }
+
+    if (changes.length === 0) return;
+
+    let executor = null;
+
+    try {
+      const logs = await newRole.guild.fetchAuditLogs({
+        type: AuditLogEvent.RoleUpdate,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        e.target?.id === newRole.id &&
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (rôle modifié) :", error);
+    }
+
+    // Exclure les modifications faites par le bot
+    if (executor && executor.id === client.user.id) return;
+
+    changes.push({
+      name: "🛡️ Modifié par",
+      value: executor ? `${executor}` : "Inconnu",
+      inline: false
+    });
+
+    changes.unshift({
+      name: "🏷️ Rôle",
+      value: `${newRole}`,
+      inline: false
+    });
+
+    await sendLog(
+      newRole.guild,
+      "✏️ Rôle modifié",
+      null,
+      LOG_CHANNEL_NAME,
+      changes,
+      0xFEE75C
+    );
+  }
+);
+
+
+// ======================================================
+// EMOJI CRÉÉ
+// ======================================================
+
+client.on(
+  "emojiCreate",
+  async emoji => {
+
+    if (!emoji.guild) return;
+
+    let executor = null;
+
+    try {
+      const logs = await emoji.guild.fetchAuditLogs({
+        type: AuditLogEvent.EmojiCreate,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        e.target?.id === emoji.id &&
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (emoji créé) :", error);
+    }
+
+    await sendLog(
+      emoji.guild,
+      "😀 Emoji créé",
+      null,
+      LOG_CHANNEL_NAME,
+      [
+        {
+          name: "😀 Emoji",
+          value: `${emoji} \`${emoji.name}\``,
+          inline: true
+        },
+        {
+          name: "🛡️ Créé par",
+          value: executor ? `${executor}` : "Inconnu",
+          inline: true
+        },
+        {
+          name: "🔗 ID",
+          value: `\`${emoji.id}\``,
+          inline: true
+        }
+      ],
+      0x57F287
+    );
+  }
+);
+
+
+// ======================================================
+// EMOJI SUPPRIMÉ
+// ======================================================
+
+client.on(
+  "emojiDelete",
+  async emoji => {
+
+    if (!emoji.guild) return;
+
+    let executor = null;
+
+    try {
+      const logs = await emoji.guild.fetchAuditLogs({
+        type: AuditLogEvent.EmojiDelete,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        e.target?.id === emoji.id &&
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (emoji supprimé) :", error);
+    }
+
+    await sendLog(
+      emoji.guild,
+      "🗑️ Emoji supprimé",
+      null,
+      LOG_CHANNEL_NAME,
+      [
+        {
+          name: "😀 Emoji",
+          value: `\`${emoji.name}\``,
+          inline: true
+        },
+        {
+          name: "🛡️ Supprimé par",
+          value: executor ? `${executor}` : "Inconnu",
+          inline: true
+        },
+        {
+          name: "🔗 ID",
+          value: `\`${emoji.id}\``,
+          inline: true
+        }
+      ],
+      0xED4245
+    );
+  }
+);
+
+
+// ======================================================
+// EMOJI MODIFIÉ
+// ======================================================
+
+client.on(
+  "emojiUpdate",
+  async (oldEmoji, newEmoji) => {
+
+    if (!newEmoji.guild) return;
+
+    if (oldEmoji.name === newEmoji.name) return;
+
+    let executor = null;
+
+    try {
+      const logs = await newEmoji.guild.fetchAuditLogs({
+        type: AuditLogEvent.EmojiUpdate,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        e.target?.id === newEmoji.id &&
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (emoji modifié) :", error);
+    }
+
+    await sendLog(
+      newEmoji.guild,
+      "✏️ Emoji renommé",
+      null,
+      LOG_CHANNEL_NAME,
+      [
+        {
+          name: "😀 Emoji",
+          value: `${newEmoji}`,
+          inline: true
+        },
+        {
+          name: "📝 Ancien nom",
+          value: `\`${oldEmoji.name}\``,
+          inline: true
+        },
+        {
+          name: "📝 Nouveau nom",
+          value: `\`${newEmoji.name}\``,
+          inline: true
+        },
+        {
+          name: "🛡️ Renommé par",
+          value: executor ? `${executor}` : "Inconnu",
+          inline: false
+        }
+      ],
+      0xFEE75C
+    );
+  }
+);
+
+
+// ======================================================
+// STICKER CRÉÉ
+// ======================================================
+
+client.on(
+  "stickerCreate",
+  async sticker => {
+
+    if (!sticker.guild) return;
+
+    let executor = null;
+
+    try {
+      const logs = await sticker.guild.fetchAuditLogs({
+        type: AuditLogEvent.StickerCreate,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        e.target?.id === sticker.id &&
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (sticker créé) :", error);
+    }
+
+    await sendLog(
+      sticker.guild,
+      "🏷️ Sticker créé",
+      null,
+      LOG_CHANNEL_NAME,
+      [
+        {
+          name: "🏷️ Sticker",
+          value: `\`${sticker.name}\``,
+          inline: true
+        },
+        {
+          name: "🛡️ Créé par",
+          value: executor ? `${executor}` : "Inconnu",
+          inline: true
+        },
+        {
+          name: "🔗 ID",
+          value: `\`${sticker.id}\``,
+          inline: true
+        }
+      ],
+      0x57F287
+    );
+  }
+);
+
+
+// ======================================================
+// STICKER SUPPRIMÉ
+// ======================================================
+
+client.on(
+  "stickerDelete",
+  async sticker => {
+
+    if (!sticker.guild) return;
+
+    let executor = null;
+
+    try {
+      const logs = await sticker.guild.fetchAuditLogs({
+        type: AuditLogEvent.StickerDelete,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        e.target?.id === sticker.id &&
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (sticker supprimé) :", error);
+    }
+
+    await sendLog(
+      sticker.guild,
+      "🗑️ Sticker supprimé",
+      null,
+      LOG_CHANNEL_NAME,
+      [
+        {
+          name: "🏷️ Sticker",
+          value: `\`${sticker.name}\``,
+          inline: true
+        },
+        {
+          name: "🛡️ Supprimé par",
+          value: executor ? `${executor}` : "Inconnu",
+          inline: true
+        }
+      ],
+      0xED4245
+    );
+  }
+);
+
+
+// ======================================================
+// STICKER MODIFIÉ
+// ======================================================
+
+client.on(
+  "stickerUpdate",
+  async (oldSticker, newSticker) => {
+
+    if (!newSticker.guild) return;
+
+    if (oldSticker.name === newSticker.name &&
+        oldSticker.description === newSticker.description &&
+        oldSticker.emoji === newSticker.emoji) return;
+
+    let executor = null;
+
+    try {
+      const logs = await newSticker.guild.fetchAuditLogs({
+        type: AuditLogEvent.StickerUpdate,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        e.target?.id === newSticker.id &&
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (sticker modifié) :", error);
+    }
+
+    const changes = [
+      {
+        name: "🏷️ Sticker",
+        value: `\`${newSticker.name}\``,
+        inline: false
+      }
+    ];
+
+    if (oldSticker.name !== newSticker.name) {
+      changes.push({
+        name: "📝 Nom",
+        value: `Avant : \`${oldSticker.name}\`\nAprès : \`${newSticker.name}\``,
+        inline: false
+      });
+    }
+
+    if (oldSticker.description !== newSticker.description) {
+      changes.push({
+        name: "📝 Description",
+        value: `Avant : \`${oldSticker.description || "Aucune"}\`\nAprès : \`${newSticker.description || "Aucune"}\``,
+        inline: false
+      });
+    }
+
+    if (oldSticker.emoji !== newSticker.emoji) {
+      changes.push({
+        name: "😀 Emoji associé",
+        value: `Avant : ${oldSticker.emoji || "Aucun"}\nAprès : ${newSticker.emoji || "Aucun"}`, 
+        inline: false
+      });
+    }
+
+    changes.push({
+      name: "🛡️ Modifié par",
+      value: executor ? `${executor}` : "Inconnu",
+      inline: false
+    });
+
+    await sendLog(
+      newSticker.guild,
+      "✏️ Sticker modifié",
+      null,
+      LOG_CHANNEL_NAME,
+      changes,
+      0xFEE75C
+    );
+  }
+);
+
+
+// ======================================================
+// INVITATION CRÉÉE
+// ======================================================
+
+client.on(
+  "inviteCreate",
+  async invite => {
+
+    if (!invite.guild) return;
+
+    let executor = null;
+
+    try {
+      const logs = await invite.guild.fetchAuditLogs({
+        type: AuditLogEvent.InviteCreate,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        e.target?.id === invite.code &&
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (invitation créée) :", error);
+    }
+
+    await sendLog(
+      invite.guild,
+      "📨 Invitation créée",
+      null,
+      ADMIN_LOG_CHANNEL_NAME,
+      [
+        {
+          name: "🔗 Code",
+          value: `\`${invite.code}\``,
+          inline: true
+        },
+        {
+          name: "📍 Salon",
+          value: invite.channel ? `${invite.channel}` : "Inconnu",
+          inline: true
+        },
+        {
+          name: "👤 Créée par",
+          value: invite.inviter ? `${invite.inviter}` : "Inconnu",
+          inline: true
+        },
+        {
+          name: "⏱️ Utilisations max",
+          value: invite.maxUses === 0 ? "Illimité" : `${invite.maxUses}`,
+          inline: true
+        },
+        {
+          name: "⏳ Expiration",
+          value: invite.maxAge === 0 ? "Jamais" : `${invite.maxAge / 60} min`,
+          inline: true
+        },
+        {
+          name: "🛡️ Dans l'audit",
+          value: executor ? `${executor}` : "Inconnu",
+          inline: true
+        }
+      ],
+      0x57F287
+    );
+  }
+);
+
+
+// ======================================================
+// INVITATION SUPPRIMÉE
+// ======================================================
+
+client.on(
+  "inviteDelete",
+  async invite => {
+
+    if (!invite.guild) return;
+
+    let executor = null;
+
+    try {
+      const logs = await invite.guild.fetchAuditLogs({
+        type: AuditLogEvent.InviteDelete,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        e.target?.id === invite.code &&
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (invitation supprimée) :", error);
+    }
+
+    await sendLog(
+      invite.guild,
+      "🗑️ Invitation supprimée",
+      null,
+      ADMIN_LOG_CHANNEL_NAME,
+      [
+        {
+          name: "🔗 Code",
+          value: `\`${invite.code}\``,
+          inline: true
+        },
+        {
+          name: "📍 Salon",
+          value: invite.channel ? `${invite.channel}` : "Inconnu",
+          inline: true
+        },
+        {
+          name: "🛡️ Supprimée par",
+          value: executor ? `${executor}` : "Inconnu",
+          inline: true
+        }
+      ],
+      0xED4245
+    );
+  }
+);
+
+
+// ======================================================
+// WEBHOOK CRÉÉ
+// ======================================================
+
+client.on(
+  "webhookCreate",
+  async webhook => {
+
+    if (!webhook.guild) return;
+
+    let executor = null;
+
+    try {
+      const logs = await webhook.guild.fetchAuditLogs({
+        type: AuditLogEvent.WebhookCreate,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        e.target?.id === webhook.id &&
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (webhook créé) :", error);
+    }
+
+    await sendLog(
+      webhook.guild,
+      "🪝 Webhook créé",
+      null,
+      ADMIN_LOG_CHANNEL_NAME,
+      [
+        {
+          name: "🪝 Webhook",
+          value: `\`${webhook.name}\``,
+          inline: true
+        },
+        {
+          name: "📍 Salon",
+          value: webhook.channelId ? `<#${webhook.channelId}>` : "Inconnu",
+          inline: true
+        },
+        {
+          name: "🛡️ Créé par",
+          value: executor ? `${executor}` : "Inconnu",
+          inline: true
+        },
+        {
+          name: "🔗 ID",
+          value: `\`${webhook.id}\``,
+          inline: true
+        }
+      ],
+      0x57F287
+    );
+  }
+);
+
+
+// ======================================================
+// WEBHOOK SUPPRIMÉ
+// ======================================================
+
+client.on(
+  "webhookDelete",
+  async webhook => {
+
+    if (!webhook.guild) return;
+
+    let executor = null;
+
+    try {
+      const logs = await webhook.guild.fetchAuditLogs({
+        type: AuditLogEvent.WebhookDelete,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        e.target?.id === webhook.id &&
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (webhook supprimé) :", error);
+    }
+
+    await sendLog(
+      webhook.guild,
+      "🗑️ Webhook supprimé",
+      null,
+      ADMIN_LOG_CHANNEL_NAME,
+      [
+        {
+          name: "🪝 Webhook",
+          value: `\`${webhook.name}\``,
+          inline: true
+        },
+        {
+          name: "📍 Salon",
+          value: webhook.channelId ? `<#${webhook.channelId}>` : "Inconnu",
+          inline: true
+        },
+        {
+          name: "🛡️ Supprimé par",
+          value: executor ? `${executor}` : "Inconnu",
+          inline: true
+        }
+      ],
+      0xED4245
+    );
+  }
+);
+
+
+// ======================================================
+// WEBHOOK MODIFIÉ
+// ======================================================
+
+client.on(
+  "webhookUpdate",
+  async (oldWebhook, newWebhook) => {
+
+    if (!newWebhook.guild) return;
+
+    if (oldWebhook.name === newWebhook.name &&
+        oldWebhook.channelId === newWebhook.channelId) return;
+
+    let executor = null;
+
+    try {
+      const logs = await newWebhook.guild.fetchAuditLogs({
+        type: AuditLogEvent.WebhookUpdate,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        e.target?.id === newWebhook.id &&
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (webhook modifié) :", error);
+    }
+
+    const changes = [
+      {
+        name: "🪝 Webhook",
+        value: `\`${newWebhook.name}\``,
+        inline: false
+      }
+    ];
+
+    if (oldWebhook.name !== newWebhook.name) {
+      changes.push({
+        name: "📝 Nom",
+        value: `Avant : \`${oldWebhook.name}\`\nAprès : \`${newWebhook.name}\``,
+        inline: false
+      });
+    }
+
+    if (oldWebhook.channelId !== newWebhook.channelId) {
+      changes.push({
+        name: "📍 Salon",
+        value: `Avant : <#${oldWebhook.channelId}>\nAprès : <#${newWebhook.channelId}>`,
+        inline: false
+      });
+    }
+
+    changes.push({
+      name: "🛡️ Modifié par",
+      value: executor ? `${executor}` : "Inconnu",
+      inline: false
+    });
+
+    await sendLog(
+      newWebhook.guild,
+      "✏️ Webhook modifié",
+      null,
+      ADMIN_LOG_CHANNEL_NAME,
+      changes,
+      0xFEE75C
+    );
+  }
+);
+
+
+// ======================================================
+// SERVEUR MODIFIÉ
+// ======================================================
+
+client.on(
+  "guildUpdate",
+  async (oldGuild, newGuild) => {
+
+    const changes = [];
+
+    if (oldGuild.name !== newGuild.name) {
+      changes.push({
+        name: "📝 Nom du serveur",
+        value: `Avant : \`${oldGuild.name}\`\nAprès : \`${newGuild.name}\``,
+        inline: false
+      });
+    }
+
+    if (oldGuild.icon !== newGuild.icon) {
+      changes.push({
+        name: "🖼️ Icône",
+        value: newGuild.icon ? `[Nouvelle icône](${newGuild.iconURL({ size: 256 })})` : "Icône retirée",
+        inline: false
+      });
+    }
+
+    if (oldGuild.banner !== newGuild.banner) {
+      changes.push({
+        name: "🎨 Bannière",
+        value: newGuild.banner ? `[Nouvelle bannière](${newGuild.bannerURL({ size: 512 })})` : "Bannière retirée",
+        inline: false
+      });
+    }
+
+    if (oldGuild.description !== newGuild.description) {
+      changes.push({
+        name: "📝 Description",
+        value: `Avant : \`${oldGuild.description || "Aucune"}\`\nAprès : \`${newGuild.description || "Aucune"}\``,
+        inline: false
+      });
+    }
+
+    if (oldGuild.verificationLevel !== newGuild.verificationLevel) {
+      const levels = ["Aucun", "Faible (email)", "Moyen (5 min)", "Élevé (10 min)", "Très élevé (téléphone)"];
+      changes.push({
+        name: "🛡️ Niveau de vérification",
+        value: `Avant : ${levels[oldGuild.verificationLevel]}\nAprès : ${levels[newGuild.verificationLevel]}`,
+        inline: false
+      });
+    }
+
+    if (oldGuild.vanityURLCode !== newGuild.vanityURLCode) {
+      changes.push({
+        name: "🔗 URL personnalisée",
+        value: newGuild.vanityURLCode ? `discord.gg/${newGuild.vanityURLCode}` : "Retirée",
+        inline: false
+      });
+    }
+
+    if (oldGuild.systemChannelId !== newGuild.systemChannelId) {
+      changes.push({
+        name: "📢 Salon système",
+        value: `Avant : ${oldGuild.systemChannelId ? `<#${oldGuild.systemChannelId}>` : "Aucun"}\nAprès : ${newGuild.systemChannelId ? `<#${newGuild.systemChannelId}>` : "Aucun"}`,
+        inline: false
+      });
+    }
+
+    if (oldGuild.afkChannelId !== newGuild.afkChannelId) {
+      changes.push({
+        name: "💤 Salon AFK",
+        value: `Avant : ${oldGuild.afkChannelId ? `<#${oldGuild.afkChannelId}>` : "Aucun"}\nAprès : ${newGuild.afkChannelId ? `<#${newGuild.afkChannelId}>` : "Aucun"}`,
+        inline: false
+      });
+    }
+
+    if (oldGuild.afkTimeout !== newGuild.afkTimeout) {
+      changes.push({
+        name: "⏱️ Timeout AFK",
+        value: `Avant : ${oldGuild.afkTimeout / 60} min\nAprès : ${newGuild.afkTimeout / 60} min`,
+        inline: false
+      });
+    }
+
+    if (changes.length === 0) return;
+
+    let executor = null;
+
+    try {
+      const logs = await newGuild.fetchAuditLogs({
+        type: AuditLogEvent.GuildUpdate,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (serveur modifié) :", error);
+    }
+
+    changes.push({
+      name: "🛡️ Modifié par",
+      value: executor ? `${executor}` : "Inconnu",
+      inline: false
+    });
+
+    await sendLog(
+      newGuild,
+      "⚙️ Serveur modifié",
+      null,
+      ADMIN_LOG_CHANNEL_NAME,
+      changes,
+      0xFEE75C
+    );
+  }
+);
+
+
+// ======================================================
+// THREAD CRÉÉ
+// ======================================================
+
+client.on(
+  "threadCreate",
+  async thread => {
+
+    if (!thread.guild) return;
+
+    // Ignorer les threads dans les salons privés (staff)
+    const parent = thread.parent;
+    if (parent) {
+      const isPublic =
+        parent
+          .permissionsFor(thread.guild.roles.everyone)
+          ?.has(PermissionFlagsBits.ViewChannel);
+
+      if (!isPublic) return;
+    }
+
+    let executor = null;
+
+    try {
+      const logs = await thread.guild.fetchAuditLogs({
+        type: AuditLogEvent.ThreadCreate,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        e.target?.id === thread.id &&
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (thread créé) :", error);
+    }
+
+    await sendLog(
+      thread.guild,
+      "🧵 Thread créé",
+      null,
+      ADMIN_LOG_CHANNEL_NAME,
+      [
+        {
+          name: "🧵 Thread",
+          value: `${thread}`,
+          inline: true
+        },
+        {
+          name: "📍 Salon parent",
+          value: parent ? `${parent}` : "Inconnu",
+          inline: true
+        },
+        {
+          name: "👤 Créé par",
+          value: thread.ownerId ? `<@${thread.ownerId}>` : "Inconnu",
+          inline: true
+        },
+        {
+          name: "🛡️ Dans l'audit",
+          value: executor ? `${executor}` : "Inconnu",
+          inline: true
+        }
+      ],
+      0x57F287
+    );
+  }
+);
+
+
+// ======================================================
+// THREAD SUPPRIMÉ
+// ======================================================
+
+client.on(
+  "threadDelete",
+  async thread => {
+
+    if (!thread.guild) return;
+
+    // Ignorer les threads dans les salons privés (staff)
+    const parent = thread.parent;
+    if (parent) {
+      const isPublic =
+        parent
+          .permissionsFor(thread.guild.roles.everyone)
+          ?.has(PermissionFlagsBits.ViewChannel);
+
+      if (!isPublic) return;
+    }
+
+    let executor = null;
+
+    try {
+      const logs = await thread.guild.fetchAuditLogs({
+        type: AuditLogEvent.ThreadDelete,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        e.target?.id === thread.id &&
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (thread supprimé) :", error);
+    }
+
+    await sendLog(
+      thread.guild,
+      "🗑️ Thread supprimé",
+      null,
+      ADMIN_LOG_CHANNEL_NAME,
+      [
+        {
+          name: "🧵 Thread",
+          value: `\`${thread.name}\``,
+          inline: true
+        },
+        {
+          name: "📍 Salon parent",
+          value: parent ? `${parent}` : "Inconnu",
+          inline: true
+        },
+        {
+          name: "🛡️ Supprimé par",
+          value: executor ? `${executor}` : "Inconnu",
+          inline: true
+        }
+      ],
+      0xED4245
+    );
+  }
+);
+
+
+// ======================================================
+// THREAD MODIFIÉ
+// ======================================================
+
+client.on(
+  "threadUpdate",
+  async (oldThread, newThread) => {
+
+    if (!newThread.guild) return;
+
+    // Ignorer les threads dans les salons privés (staff)
+    const parent = newThread.parent;
+    if (parent) {
+      const isPublic =
+        parent
+          .permissionsFor(newThread.guild.roles.everyone)
+          ?.has(PermissionFlagsBits.ViewChannel);
+
+      if (!isPublic) return;
+    }
+
+    if (oldThread.name === newThread.name &&
+        oldThread.archived === newThread.archived &&
+        oldThread.locked === newThread.locked) return;
+
+    let executor = null;
+
+    try {
+      const logs = await newThread.guild.fetchAuditLogs({
+        type: AuditLogEvent.ThreadUpdate,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        e.target?.id === newThread.id &&
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) executor = entry.executor;
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (thread modifié) :", error);
+    }
+
+    const changes = [
+      {
+        name: "🧵 Thread",
+        value: `${newThread}`,
+        inline: false
+      }
+    ];
+
+    if (oldThread.name !== newThread.name) {
+      changes.push({
+        name: "📝 Nom",
+        value: `Avant : \`${oldThread.name}\`\nAprès : \`${newThread.name}\``,
+        inline: false
+      });
+    }
+
+    if (oldThread.archived !== newThread.archived) {
+      changes.push({
+        name: "📦 Archivé",
+        value: newThread.archived ? "✅ Oui" : "❌ Non",
+        inline: true
+      });
+    }
+
+    if (oldThread.locked !== newThread.locked) {
+      changes.push({
+        name: "🔒 Verrouillé",
+        value: newThread.locked ? "✅ Oui" : "❌ Non",
+        inline: true
+      });
+    }
+
+    changes.push({
+      name: "🛡️ Modifié par",
+      value: executor ? `${executor}` : "Inconnu",
+      inline: false
+    });
+
+    await sendLog(
+      newThread.guild,
+      "✏️ Thread modifié",
+      null,
+      ADMIN_LOG_CHANNEL_NAME,
+      changes,
+      0xFEE75C
+    );
+  }
+);
+
+
+// ======================================================
+// MESSAGE ÉPINGLÉ
+// ======================================================
+
+client.on(
+  "messagePinsUpdate",
+  async (channel, time) => {
+
+    if (!channel.guild) return;
+
+    // Ignorer les salons privés (staff)
+    const isPublic =
+      channel
+        .permissionsFor(channel.guild.roles.everyone)
+        ?.has(PermissionFlagsBits.ViewChannel);
+
+    if (!isPublic) return;
+
+    // Déterminer si c'est un épinglage ou un désépinglage
+    // On vérifie les derniers messages épinglés
+    let isPin = false;
+    let pinnedMessage = null;
+
+    try {
+      const pins = await channel.messages.fetchPinned();
+      if (time) {
+        // Si on a un time, c'est que le message avec cet ID a été épinglé
+        isPin = true;
+      }
+    } catch (error) {
+      // Ignorer
+    }
+
+    let executor = null;
+    let pinMessage = null;
+
+    try {
+      const logs = await channel.guild.fetchAuditLogs({
+        type: isPin ? AuditLogEvent.MessagePin : AuditLogEvent.MessageUnpin,
+        limit: 5
+      });
+
+      const entry = logs.entries.find(e =>
+        e.extra?.channel?.id === channel.id &&
+        Date.now() - e.createdTimestamp < 15000
+      );
+
+      if (entry) {
+        executor = entry.executor;
+        isPin = entry.action === AuditLogEvent.MessagePin;
+      }
+    } catch (error) {
+      console.error("Impossible de lire les logs d'audit (message épinglé) :", error);
+    }
+
+    await sendLog(
+      channel.guild,
+      isPin ? "📌 Message épinglé" : "📍 Message désépinglé",
+      null,
+      LOG_CHANNEL_NAME,
+      [
+        {
+          name: "📍 Salon",
+          value: `${channel}`,
+          inline: true
+        },
+        {
+          name: "🛡️ Effectué par",
+          value: executor ? `${executor}` : "Inconnu",
+          inline: true
+        }
+      ],
+      isPin ? 0x57F287 : 0xFEE75C
     );
   }
 );
