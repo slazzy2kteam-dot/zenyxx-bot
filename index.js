@@ -306,6 +306,127 @@ function startTwitchLiveCheck() {
 }
 
 // ======================================================
+// SYSTÈME NOTIFICATION NOUVELLE VIDÉO TIKTOK
+// ======================================================
+
+const TIKTOK_NOTIFY_USERNAME = "aetherofficiel";
+const TIKTOK_NOTIFY_CHANNEL_ID = "1548231185015120054"; // 📺・tiktok
+const TIKTOK_NOTIFY_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
+
+let tiktokLastVideoId = null;
+
+// Récupérer l'ID de la dernière vidéo TikTok
+async function fetchLatestTikTokVideoId() {
+  const username = TIKTOK_NOTIFY_USERNAME;
+  try {
+    const url = `https://www.tiktok.com/@${username}`;
+    const html = await new Promise((resolve, reject) => {
+      httpsModule.get(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9,fr-FR;q=0.8"
+        }
+      }, res => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          httpsModule.get(res.headers.location, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+              "Accept-Language": "en-US,en;q=0.9"
+            }
+          }, res2 => {
+            let body = "";
+            res2.on("data", chunk => body += chunk);
+            res2.on("end", () => resolve(body));
+          }).on("error", reject);
+          return;
+        }
+        let body = "";
+        res.on("data", chunk => body += chunk);
+        res.on("end", () => resolve(body));
+      }).on("error", reject);
+    });
+
+    // Chercher les IDs de vidéos dans le JSON embeded de la page
+    const videoIdMatches = html.match(/"id":"(\\d{10,})"/g);
+    if (videoIdMatches && videoIdMatches.length > 0) {
+      // Extraire le premier ID (vidéo la plus récente)
+      const idMatch = videoIdMatches[0].match(/"id":"(\\d{10,})"/);
+      return idMatch ? idMatch[1] : null;
+    }
+
+    // Alternative : chercher dans les URLs de vidéos
+    const urlMatches = html.match(/video\/(\\d{10,})/g);
+    if (urlMatches && urlMatches.length > 0) {
+      const idMatch = urlMatches[0].match(/video\/(\\d{10,})/);
+      return idMatch ? idMatch[1] : null;
+    }
+
+    return null;
+  } catch (error) {
+    console.error("[TikTok Notify] Erreur:", error.message);
+    return null;
+  }
+}
+
+// Envoyer la notification de nouvelle vidéo
+async function sendTikTokVideoNotification(guild, videoId) {
+  const channel = guild.channels.cache.get(TIKTOK_NOTIFY_CHANNEL_ID);
+  if (!channel) {
+    console.error("[TikTok Notify] Salon introuvable");
+    return;
+  }
+
+  const videoUrl = `https://www.tiktok.com/@${TIKTOK_NOTIFY_USERNAME}/video/${videoId}`;
+
+  const embed = new EmbedBuilder()
+    .setTitle("🎬 Nouvelle vidéo TikTok !")
+    .setURL(videoUrl)
+    .setColor(0x00F2EA)
+    .setDescription(
+      `**@${TIKTOK_NOTIFY_USERNAME}** vient de poster une nouvelle vidéo !\n` +
+      `Va la regarder 🔥`
+    )
+    .setTimestamp();
+
+  await channel.send({
+    content: `@everyone **Nouvelle vidéo TikTok !** @${TIKTOK_NOTIFY_USERNAME} vient de poster !\n${videoUrl}`,
+    embeds: [embed]
+  }).catch(() => null);
+}
+
+// Boucle de vérification TikTok
+async function tiktokNotifyLoop() {
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      const latestId = await fetchLatestTikTokVideoId();
+
+      if (latestId) {
+        // Premier lancement : on stocke l'ID sans notifier
+        if (tiktokLastVideoId === null) {
+          tiktokLastVideoId = latestId;
+          console.log("[TikTok Notify] Premier lancement, ID initial:", latestId);
+        }
+        // Nouvelle vidéo détectée
+        else if (latestId !== tiktokLastVideoId) {
+          console.log("[TikTok Notify] Nouvelle vidéo détectée ! ID:", latestId);
+          tiktokLastVideoId = latestId;
+          await sendTikTokVideoNotification(guild, latestId);
+        }
+      }
+    } catch (e) {
+      console.error("[TikTok Notify] Erreur boucle:", e.message);
+    }
+  }
+}
+
+// Démarrer la boucle TikTok notification
+function startTikTokNotifyCheck() {
+  tiktokNotifyLoop();
+  setInterval(tiktokNotifyLoop, TIKTOK_NOTIFY_INTERVAL_MS);
+}
+
+// ======================================================
 // COMPTEURS DE MEMBRES / ABONNÉS
 // ======================================================
 
@@ -3197,6 +3318,12 @@ client.once(
       startTwitchLiveCheck();
       console.log(
         "✅ Notifications Twitch live démarrées !"
+      );
+
+      // Démarrer la vérification nouvelle vidéo TikTok
+      startTikTokNotifyCheck();
+      console.log(
+        "✅ Notifications nouvelle vidéo TikTok démarrées !"
       );
 
     } catch (error) {
