@@ -98,6 +98,76 @@ const CASE_FILE = "./cases.json";
 
 const MAX_EMBED_FIELD = 1024;
 
+const httpsModule = require("https");
+
+// ======================================================
+// COMPTEURS DE MEMBRES / ABONNÉS
+// ======================================================
+
+const COUNTER_CHANNELS = {
+  "1547260234077311046": { type: "members", label: "👥 Membres" },
+  "1547260576680509450": { type: "twitch", label: "👥 Abonnés Twitch", username: null },
+  "1547260849830367334": { type: "tiktok", label: "👥 Abonnés Tiktok", username: "aetherofficiel" }
+};
+
+const COUNTER_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
+async function updateMemberCounters(guild) {
+  const memberChannel = guild.channels.cache.get("1547260234077311046");
+  if (memberChannel && memberChannel.isVoiceBased()) {
+    const count = guild.memberCount;
+    const newName = `👥 Membres : ${count}`;
+    if (memberChannel.name !== newName) {
+      await memberChannel.setName(newName).catch(() => null);
+    }
+  }
+}
+
+async function updateTikTokCounter(guild) {
+  const tiktokChannel = guild.channels.cache.get("1547260849830367334");
+  if (!tiktokChannel || !tiktokChannel.isVoiceBased()) return;
+
+  const username = "aetherofficiel";
+  try {
+    const url = `https://www.tiktok.com/@${username}`;
+    const html = await new Promise((resolve, reject) => {
+      httpsModule.get(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept-Language": "en-US,en;q=0.9"
+        }
+      }, res => {
+        let body = "";
+        res.on("data", chunk => body += chunk);
+        res.on("end", () => resolve(body));
+      }).on("error", reject);
+    });
+
+    const match = html.match(/"followerCount":(\d+)/);
+    const followers = match ? parseInt(match[1], 10) : null;
+    if (followers !== null) {
+      const newName = `👥 Abonnés Tiktok : ${followers}`;
+      if (tiktokChannel.name !== newName) {
+        await tiktokChannel.setName(newName).catch(() => null);
+      }
+    }
+  } catch (error) {
+    console.error("Erreur récupération followers TikTok :", error.message);
+  }
+}
+
+async function updateAllCounters() {
+  for (const guild of client.guilds.cache.values()) {
+    await updateMemberCounters(guild);
+    await updateTikTokCounter(guild);
+  }
+}
+
+function startCounterInterval() {
+  updateAllCounters();
+  setInterval(updateAllCounters, COUNTER_INTERVAL_MS);
+}
+
 // ======================================================
 // SYSTÈME DE VOCALES PRIVÉES
 // ======================================================
@@ -2820,6 +2890,12 @@ client.once(
       restoreVocalData();
       console.log(
         "✅ Vocales privées restaurées !"
+      );
+
+      // Démarrer les compteurs de membres / abonnés
+      startCounterInterval();
+      console.log(
+        "✅ Compteurs de membres / abonnés démarrés !"
       );
 
     } catch (error) {
@@ -5742,6 +5818,9 @@ client.on(
   "guildMemberAdd",
   member => {
 
+    // Mettre à jour le compteur de membres
+    updateMemberCounters(member.guild);
+
     const welcomeChannel =
       getLogChannel(
         member.guild,
@@ -5904,6 +5983,9 @@ client.on(
 client.on(
   "guildMemberRemove",
   async member => {
+
+    // Mettre à jour le compteur de membres
+    updateMemberCounters(member.guild);
 
     if (
       consumeBotAction(
