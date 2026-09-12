@@ -367,7 +367,8 @@ async function fetchLatestTikTokVideoId() {
 async function sendTikTokVideoNotification(guild, videoId) {
   const channel = guild.channels.cache.get(TIKTOK_NOTIFY_CHANNEL_ID);
   if (!channel) {
-    console.error("[TikTok Notify] Salon introuvable");
+    console.error("[TikTok Notify] Salon introuvable — ID:", TIKTOK_NOTIFY_CHANNEL_ID);
+    console.error("[TikTok Notify] Salons disponibles:", guild.channels.cache.map(c => c.id + "=" + c.name).join(", "));
     return;
   }
 
@@ -383,10 +384,15 @@ async function sendTikTokVideoNotification(guild, videoId) {
     )
     .setTimestamp();
 
-  await channel.send({
-    content: `@everyone **Nouvelle vidéo TikTok !** @${TIKTOK_NOTIFY_USERNAME} vient de poster !\n${videoUrl}`,
-    embeds: [embed]
-  }).catch(() => null);
+  try {
+    const msg = await channel.send({
+      content: `@everyone **Nouvelle vidéo TikTok !** @${TIKTOK_NOTIFY_USERNAME} vient de poster !\n${videoUrl}`,
+      embeds: [embed]
+    });
+    console.log("[TikTok Notify] Notification envoyée ! Message ID:", msg.id);
+  } catch (err) {
+    console.error("[TikTok Notify] Erreur envoi message:", err.message);
+  }
 }
 
 // Boucle de vérification TikTok
@@ -394,6 +400,7 @@ async function tiktokNotifyLoop() {
   for (const guild of client.guilds.cache.values()) {
     try {
       const latestId = await fetchLatestTikTokVideoId();
+      console.log("[TikTok Notify] Vérification — ID actuel:", latestId, "| ID stocké:", tiktokLastVideoId);
 
       if (latestId) {
         // Premier lancement : on stocke l'ID sans notifier
@@ -407,6 +414,12 @@ async function tiktokNotifyLoop() {
           tiktokLastVideoId = latestId;
           await sendTikTokVideoNotification(guild, latestId);
         }
+        // Pas de nouvelle vidéo
+        else {
+          console.log("[TikTok Notify] Pas de nouvelle vidéo");
+        }
+      } else {
+        console.error("[TikTok Notify] Impossible de récupérer l'ID — le scraping a échoué");
       }
     } catch (e) {
       console.error("[TikTok Notify] Erreur boucle:", e.message);
