@@ -7071,7 +7071,8 @@ client.on(
   async channel => {
 
     if (
-      !channel.guild
+      !channel.guild ||
+      channel.name?.startsWith("ticket-")
     ) {
       return;
     }
@@ -7169,7 +7170,8 @@ client.on(
   async channel => {
 
     if (
-      !channel.guild
+      !channel.guild ||
+      channel.name?.startsWith("ticket-")
     ) {
       return;
     }
