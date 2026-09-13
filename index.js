@@ -3153,6 +3153,50 @@ const commands = [
     ),
 
 
+  // UNTIMEOUT
+  new SlashCommandBuilder()
+
+    .setName(
+      "untimeout"
+    )
+
+    .setDescription(
+      "Retire le timeout d'un membre"
+    )
+
+    .addUserOption(
+      o =>
+        o
+          .setName(
+            "membre"
+          )
+          .setDescription(
+            "Le membre à rétablir"
+          )
+          .setRequired(
+            true
+          )
+    )
+
+    .addStringOption(
+      o =>
+        o
+          .setName(
+            "raison"
+          )
+          .setDescription(
+            "Raison de la fin du timeout"
+          )
+          .setRequired(
+            false
+          )
+    )
+
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.ModerateMembers
+    ),
+
+
   // CLEAR
   new SlashCommandBuilder()
 
@@ -4260,6 +4304,88 @@ client.on(
 
           type:
             "unban",
+
+          memberUser:
+            user,
+
+          moderator:
+            member.user,
+
+          reason
+        });
+
+        return;
+      }
+
+
+      // ================================================
+      // UNTIMEOUT
+      // ================================================
+
+      if (
+        commandName ===
+        "untimeout"
+      ) {
+
+        const user =
+          options.getUser(
+            "membre"
+          );
+
+        const reason =
+          options.getString(
+            "raison"
+          ) ||
+          "Aucune raison fournie";
+
+        const targetMember =
+          await guild.members
+            .fetch(user.id)
+            .catch(
+              () => null
+            );
+
+        if (!targetMember) {
+          await interaction.reply({
+            content:
+              "❌ Ce membre n'est pas sur le serveur.",
+            ephemeral:
+              true
+          });
+          return;
+        }
+
+        if (!targetMember.isCommunicationDisabled()) {
+          await interaction.reply({
+            content:
+              "❌ Ce membre n'est pas en timeout.",
+            ephemeral:
+              true
+          });
+          return;
+        }
+
+        await targetMember.timeout(
+          null,
+          reason
+        );
+
+        await interaction.reply(
+          `✅ **${user.tag}** n'est plus en timeout.`
+        );
+
+        await sendModerationLog({
+
+          guild,
+
+          title:
+            "✅ Fin de timeout",
+
+          color:
+            0x57F287,
+
+          type:
+            "untimeout",
 
           memberUser:
             user,
