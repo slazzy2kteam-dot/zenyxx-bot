@@ -15,10 +15,13 @@ const CONFIG = {
   checkIntervalMs: 3 * 60 * 1000,
   maxFailures: 10,
   knownIdsFile: path.join(__dirname, "tiktok-known-ids.json"),
+  // Microlink free tier: 25 req/jour
+  // On cache les followers 3h → ~8 requêtes/jour
+  followersCacheMs: 3 * 60 * 60 * 1000,
 };
 
 // ======================================================
-// ÉTAT
+// ÉTAT GLOBAL
 // ======================================================
 
 let consecutiveFailures = 0;
@@ -27,11 +30,9 @@ let client = null;
 
 let knownVideoIds = new Set();
 let cachedFollowers = null;
+let cachedLikes = null;
 let followersTimestamp = 0;
-const FOLLOWERS_TTL = 5 * 60 * 1000;
-
 let fetchInProgress = false;
-let fetchPromise = null;
 
 // ======================================================
 // CHARGEMENT / SAUVEGARDE DES IDs
@@ -43,7 +44,7 @@ function loadKnownIds() {
       const data = JSON.parse(fs.readFileSync(CONFIG.knownIdsFile, "utf8"));
       knownVideoIds = new Set(data);
       console.log(
-        `[TikTok Monitor] ${knownVideoIds.size} IDs deja connus charges`
+        `[TikTok Monitor] ${knownVideoIds.size} IDs déjà connus chargés`
       );
     }
   } catch (e) {
@@ -64,25 +65,114 @@ function saveKnownIds() {
 }
 
 // ======================================================
-// STRATÉGIE V5 — Vidéos + Followers séparés
+// UTILITAIRE — Requête avec retry et timeout
+// ======================================================
+
+async function fetchWithRetry(url, options = {}, maxRetries = 2, baseDelay = 2000) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(
+        () => controller.abort(),
+        options.timeout || 30000
+      );
+      const res = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      return res;
+    } catch (e) {
+      if (attempt < maxRetries) {
+        const delay = baseDelay * Math.pow(2, attempt);
+        console.log(
+          `[TikTok Monitor] Tentative ${attempt + 1}/${maxRetries + 1} échouée pour ${url.substring(0, 80)} — retry dans ${delay}ms: ${e.message}`
+        );
+        await new Promise((r) => setTimeout(r, delay));
+      } else {
+        throw e;
+      }
+    }
+  }
+}
+
+// ======================================================
+// V6 — STRATÉGIE
 //
-// V4 avait un bug : quand RSSHub trouvait des vidéos,
-// il ne cherchait les followers QUE sur Urlebird
-// (qui est bloqué par Render). Il n'essayait jamais
-// le endpoint /embed/ de TikTok pour les followers.
+// VIDÉOS :
+//  1) hub.slarker.me JSON Feed (?format=json)
+//     → plus facile à parser que le RSS XML
+//     → 30s timeout + 2 retries
+//  2) hub.slarker.me RSS XML (backup)
+//  3) Autres instances RSSHub (dernier recours)
 //
-// V5 sépare la logique :
-// - VIDÉOS : RSSHub RSS (hub.slarker.me fonctionne)
-// - FOLLOWERS : TikTok /embed/@user (contient
-//   followerCount, heartCount, etc. dans le HTML)
-//   Si bloqué → CORS proxy → Urlebird → "N/A"
+// FOLLOWERS :
+//  1) Microlink API (api.microlink.io)
+//     → Service gratuit qui charge TikTok
+//       depuis ses propres serveurs (pas bloqué
+//       par Cloudflare depuis Render)
+//     → Retourne "N Followers" dans le
+//       champ description
+//     → 25 requêtes/jour (gratuit) → cache 3h
+//  2) Microlink sur /embed/ (backup format)
+//  3) Embed direct TikTok (backup, souvent bloqué)
 //
-// Le endpoint /embed/ est le moins protégé par
-// Cloudflare car il est conçu pour les iframes externes.
 // ======================================================
 
 // ======================================================
-// VIDÉOS — RSSHub instances publiques (RSS XML)
+// VIDÉOS — JSON Feed (hub.slarker.me)
+// ======================================================
+
+async function fetchVideoIdsFromJsonFeed(instance) {
+  const jsonUrl = `${instance}/tiktok/user/@${CONFIG.username}?format=json`;
+  console.log(`[TikTok Monitor] Essai JSON Feed: ${jsonUrl.substring(0, 70)}...`);
+
+  try {
+    const res = await fetchWithRetry(
+      jsonUrl,
+      {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; TikTokMonitor/6.0)",
+          Accept: "application/json",
+        },
+        timeout: 30000,
+      },
+      2
+    );
+
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.items && data.items.length > 0) {
+        const ids = new Set();
+        for (const item of data.items) {
+          const urlMatch = (item.url || "").match(/video\/(\d{15,20})/);
+          if (urlMatch) ids.add(urlMatch[1]);
+          if (item.id) {
+            const idMatch = String(item.id).match(/video\/(\d{15,20})/);
+            if (idMatch) ids.add(idMatch[1]);
+          }
+        }
+        if (ids.size > 0) {
+          console.log(
+            `[TikTok Monitor] JSON Feed OK — ${ids.size} vidéo(s)`
+          );
+          return { videoIds: ids, source: `jsonfeed-${instance}` };
+        }
+      }
+    } else {
+      console.log(
+        `[TikTok Monitor] JSON Feed — HTTP ${res.status}`
+      );
+    }
+  } catch (e) {
+    console.log(`[TikTok Monitor] JSON Feed — erreur: ${e.message}`);
+  }
+
+  return null;
+}
+
+// ======================================================
+// VIDÉOS — RSS XML (hub.slarker.me + backup)
 // ======================================================
 
 const RSSHUB_INSTANCES = [
@@ -91,90 +181,38 @@ const RSSHUB_INSTANCES = [
   "https://rsshub.rssforever.com",
 ];
 
-async function fetchVideoIds() {
-  for (const instance of RSSHUB_INSTANCES) {
-    // Essayer le RSS (XML) — c'est ce qui a marché en V4
-    try {
-      console.log(`[TikTok Monitor] Essai RSSHub RSS: ${instance}`);
-      const rssUrl = `${instance}/tiktok/user/@${CONFIG.username}`;
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
-      const res = await fetch(rssUrl, {
+async function fetchVideoIdsFromRss(instance) {
+  const rssUrl = `${instance}/tiktok/user/@${CONFIG.username}`;
+  console.log(`[TikTok Monitor] Essai RSS XML: ${rssUrl.substring(0, 70)}...`);
+
+  try {
+    const res = await fetchWithRetry(
+      rssUrl,
+      {
         headers: {
           "User-Agent":
-            "Mozilla/5.0 (compatible; TikTokMonitor/5.0)",
+            "Mozilla/5.0 (compatible; TikTokMonitor/6.0)",
           Accept: "application/rss+xml, application/xml, text/xml",
         },
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
+        timeout: 30000,
+      },
+      1
+    );
 
-      if (res.ok) {
-        const xml = await res.text();
-        const ids = parseRssXml(xml);
-        if (ids.size > 0) {
-          console.log(
-            `[TikTok Monitor] RSSHub RSS (${instance}) OK — ${ids.size} video(s)`
-          );
-          return { videoIds: ids, source: `rsshub-rss-${instance}` };
-        }
-      } else {
+    if (res.ok) {
+      const xml = await res.text();
+      const ids = parseRssXml(xml);
+      if (ids.size > 0) {
         console.log(
-          `[TikTok Monitor] RSSHub RSS (${instance}) — HTTP ${res.status}`
+          `[TikTok Monitor] RSS XML OK — ${ids.size} vidéo(s)`
         );
+        return { videoIds: ids, source: `rss-${instance}` };
       }
-    } catch (e) {
-      console.log(
-        `[TikTok Monitor] RSSHub RSS (${instance}) — erreur: ${e.message}`
-      );
+    } else {
+      console.log(`[TikTok Monitor] RSS XML — HTTP ${res.status}`);
     }
-
-    // Essayer aussi le JSON (API RSSHub)
-    try {
-      console.log(`[TikTok Monitor] Essai RSSHub JSON: ${instance}`);
-      const jsonUrl = `${instance}/api/tiktok/user/@${CONFIG.username}`;
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
-      const res = await fetch(jsonUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0",
-          Accept: "application/json",
-        },
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
-
-      if (res.ok) {
-        const data = await res.json();
-        if (data && data.items && data.items.length > 0) {
-          const ids = new Set();
-          for (const item of data.items) {
-            const urlMatch = (item.url || item.link || "").match(
-              /video\/(\d{15,20})/
-            );
-            if (urlMatch) ids.add(urlMatch[1]);
-            if (item.id) {
-              const idMatch = String(item.id).match(/video\/(\d{15,20})/);
-              if (idMatch) ids.add(idMatch[1]);
-            }
-          }
-          if (ids.size > 0) {
-            console.log(
-              `[TikTok Monitor] RSSHub JSON (${instance}) OK — ${ids.size} video(s)`
-            );
-            return { videoIds: ids, source: `rsshub-json-${instance}` };
-          }
-        }
-      } else {
-        console.log(
-          `[TikTok Monitor] RSSHub JSON (${instance}) — HTTP ${res.status}`
-        );
-      }
-    } catch (e) {
-      console.log(
-        `[TikTok Monitor] RSSHub JSON (${instance}) — erreur: ${e.message}`
-      );
-    }
+  } catch (e) {
+    console.log(`[TikTok Monitor] RSS XML — erreur: ${e.message}`);
   }
 
   return null;
@@ -183,8 +221,10 @@ async function fetchVideoIds() {
 function parseRssXml(xml) {
   const ids = new Set();
 
-  // Parser les IDs depuis les balises <link> et <guid>
-  const linkMatches = xml.match(/<link>[^<]*video\/(\d{15,20})[^<]*<\/link>/g);
+  // <link> contenant video/ID
+  const linkMatches = xml.match(
+    /<link>[^<]*video\/(\d{15,20})[^<]*<\/link>/g
+  );
   if (linkMatches) {
     for (const m of linkMatches) {
       const id = m.match(/video\/(\d{15,20})/);
@@ -192,6 +232,7 @@ function parseRssXml(xml) {
     }
   }
 
+  // <guid> contenant video/ID
   const guidMatches = xml.match(
     /<guid[^>]*>[^<]*video\/(\d{15,20})[^<]*<\/guid>/g
   );
@@ -202,7 +243,7 @@ function parseRssXml(xml) {
     }
   }
 
-  // Regex generique fallback
+  // Regex générique fallback
   const allVideoUrls = xml.match(/video\/(\d{15,20})/g);
   if (allVideoUrls) {
     for (const m of allVideoUrls) {
@@ -215,103 +256,169 @@ function parseRssXml(xml) {
 }
 
 // ======================================================
-// FOLLOWERS — TikTok Embed + alternatives
-//
-// Le endpoint /embed/@user de TikTok contient
-// un bloc JSON avec : followerCount, heartCount,
-// followingCount, uniqueId, nickname, etc.
-// C'est la source la plus fiable car elle est
-// conçue pour être chargée depuis l'extérieur.
-//
-// Si Cloudflare bloque depuis Render, on essaye
-// via des proxies CORS gratuits.
+// VIDÉOS — Fonction principale
 // ======================================================
 
-async function fetchFollowers() {
-  // Cache : ne pas re-demander si récent
-  if (
-    cachedFollowers !== null &&
-    Date.now() - followersTimestamp < FOLLOWERS_TTL
-  ) {
-    console.log(`[TikTok Monitor] Followers en cache: ${cachedFollowers}`);
-    return cachedFollowers;
-  }
-
-  // SOURCE 1 : TikTok Embed (direct)
-  const embedResult = await fetchFollowersFromEmbed();
-  if (embedResult !== null) {
-    cachedFollowers = embedResult;
-    followersTimestamp = Date.now();
-    console.log(
-      `[TikTok Monitor] Followers: ${embedResult} (via embed)`
-    );
-    return embedResult;
-  }
-
-  // SOURCE 2 : TikTok Embed via proxy CORS
-  const proxyResult = await fetchFollowersFromEmbedProxy();
-  if (proxyResult !== null) {
-    cachedFollowers = proxyResult;
-    followersTimestamp = Date.now();
-    console.log(
-      `[TikTok Monitor] Followers: ${proxyResult} (via proxy)`
-    );
-    return proxyResult;
-  }
-
-  // SOURCE 3 : Urlebird (probablement bloqué sur Render)
-  const urlebirdResult = await fetchFollowersFromUrlebird();
-  if (urlebirdResult !== null) {
-    cachedFollowers = urlebirdResult;
-    followersTimestamp = Date.now();
-    console.log(
-      `[TikTok Monitor] Followers: ${urlebirdResult} (via urlebird)`
-    );
-    return urlebirdResult;
-  }
-
-  // SOURCE 4 : Extraire depuis le RSS si disponible
-  // (RSSHub RSS ne contient généralement pas de followers, mais au cas où)
-  console.log(
-    `[TikTok Monitor] Followers: aucune source n'a fonctionné — N/A`
+async function fetchVideoIds() {
+  // SOURCE 1 : hub.slarker.me JSON Feed (plus facile à parser)
+  const jsonResult = await fetchVideoIdsFromJsonFeed(
+    "https://hub.slarker.me"
   );
+  if (jsonResult && jsonResult.videoIds.size > 0) {
+    return jsonResult;
+  }
+
+  // SOURCE 2 : hub.slarker.me RSS XML
+  const rssResult = await fetchVideoIdsFromRss("https://hub.slarker.me");
+  if (rssResult && rssResult.videoIds.size > 0) {
+    return rssResult;
+  }
+
+  // SOURCE 3 : Autres instances RSSHub (dernier recours)
+  for (const instance of RSSHUB_INSTANCES.slice(1)) {
+    const result = await fetchVideoIdsFromRss(instance);
+    if (result && result.videoIds.size > 0) {
+      return result;
+    }
+  }
+
   return null;
 }
+
+// ======================================================
+// FOLLOWERS — Microlink API
+//
+// Microlink charge TikTok depuis ses propres
+// serveurs (headless browser). TikTok ne bloque
+// pas Microlink car c'est un service légitime.
+// 
+// Format de retour :
+//   description: "... | 177 Likes. 28 Followers. ..."
+//   ou (embed): "Following28Followers177Likes"
+//
+// Limite gratuite : 25 requêtes/jour
+// → Cache de 3h → ~8 requêtes/jour
+// ======================================================
+
+async function fetchFollowersFromMicrolink() {
+  // SOURCE 1a : Page profil TikTok (format propre)
+  try {
+    const url = `https://api.microlink.io/?url=https://www.tiktok.com/@${CONFIG.username}`;
+    console.log(`[TikTok Monitor] Essai followers via Microlink (profil)`);
+    const res = await fetchWithRetry(
+      url,
+      { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 20000 },
+      1
+    );
+
+    if (res.ok) {
+      const data = await res.json();
+      if (data.status === "success" && data.data) {
+        const desc = data.data.description || "";
+        // Format : "... | 177 Likes. 28 Followers. ..."
+        const followerMatch = desc.match(
+          /(\d[\d,]*)\s+Followers/i
+        );
+        const likesMatch = desc.match(
+          /(\d[\d,]*)\s+Likes/i
+        );
+        if (followerMatch) {
+          const followers = parseInt(
+            followerMatch[1].replace(/,/g, ""),
+            10
+          );
+          const likes = likesMatch
+            ? parseInt(likesMatch[1].replace(/,/g, ""), 10)
+            : null;
+          console.log(
+            `[TikTok Monitor] Microlink profil OK — ${followers} followers, ${likes} likes`
+          );
+          return { followers, likes };
+        }
+      }
+    } else {
+      console.log(`[TikTok Monitor] Microlink profil — HTTP ${res.status}`);
+    }
+  } catch (e) {
+    console.log(`[TikTok Monitor] Microlink profil — erreur: ${e.message}`);
+  }
+
+  // SOURCE 1b : Page embed TikTok (format compact)
+  try {
+    const url = `https://api.microlink.io/?url=https://www.tiktok.com/embed/@${CONFIG.username}`;
+    console.log(`[TikTok Monitor] Essai followers via Microlink (embed)`);
+    const res = await fetchWithRetry(
+      url,
+      { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 20000 },
+      1
+    );
+
+    if (res.ok) {
+      const data = await res.json();
+      if (data.status === "success" && data.data) {
+        const desc = data.data.description || "";
+        // Format : "Following28Followers177Likes"
+        const followerMatch = desc.match(/(\d+)Followers/);
+        const likesMatch = desc.match(/(\d+)Likes/);
+        if (followerMatch) {
+          const followers = parseInt(followerMatch[1], 10);
+          const likes = likesMatch
+            ? parseInt(likesMatch[1], 10)
+            : null;
+          console.log(
+            `[TikTok Monitor] Microlink embed OK — ${followers} followers, ${likes} likes`
+          );
+          return { followers, likes };
+        }
+      }
+    } else {
+      console.log(`[TikTok Monitor] Microlink embed — HTTP ${res.status}`);
+    }
+  } catch (e) {
+    console.log(`[TikTok Monitor] Microlink embed — erreur: ${e.message}`);
+  }
+
+  return null;
+}
+
+// ======================================================
+// FOLLOWERS — Embed direct TikTok (backup)
+//
+// Le endpoint /embed/ de TikTok contient le
+// followerCount dans le JSON HTML embarqué.
+// Depuis Render, Cloudflare bloque souvent,
+// mais ça peut marcher parfois.
+// ======================================================
 
 async function fetchFollowersFromEmbed() {
   const embedUrl = `https://www.tiktok.com/embed/@${CONFIG.username}`;
 
   try {
     console.log(`[TikTok Monitor] Essai followers via Embed (direct)`);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
-    const res = await fetch(embedUrl, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
-        Accept: "text/html",
+    const res = await fetchWithRetry(
+      embedUrl,
+      {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+          Accept: "text/html",
+        },
+        timeout: 15000,
       },
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
+      0
+    );
 
     if (res.ok) {
       const html = await res.text();
-      const followers = extractFollowerCountFromHtml(html);
-      if (followers !== null) {
+      const result = extractFollowerDataFromHtml(html);
+      if (result) {
         console.log(
-          `[TikTok Monitor] Embed direct OK — followers: ${followers}`
+          `[TikTok Monitor] Embed direct OK — ${result.followers} followers`
         );
-        return followers;
-      } else {
-        console.log(
-          `[TikTok Monitor] Embed direct — page chargée mais followerCount non trouvé (possible page Cloudflare)`
-        );
+        return result;
       }
     } else {
-      console.log(
-        `[TikTok Monitor] Embed direct — HTTP ${res.status}`
-      );
+      console.log(`[TikTok Monitor] Embed direct — HTTP ${res.status}`);
     }
   } catch (e) {
     console.log(`[TikTok Monitor] Embed direct — erreur: ${e.message}`);
@@ -320,101 +427,7 @@ async function fetchFollowersFromEmbed() {
   return null;
 }
 
-async function fetchFollowersFromEmbedProxy() {
-  const embedUrl = `https://www.tiktok.com/embed/@${CONFIG.username}`;
-
-  const proxies = [
-    {
-      name: "allorigins",
-      url: (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-    },
-    {
-      name: "corsproxy",
-      url: (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
-    },
-    {
-      name: "codetabs",
-      url: (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
-    },
-  ];
-
-  for (const proxy of proxies) {
-    try {
-      console.log(
-        `[TikTok Monitor] Essai followers via Embed proxy: ${proxy.name}`
-      );
-      const proxyUrl = proxy.url(embedUrl);
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 20000);
-      const res = await fetch(proxyUrl, {
-        headers: { "User-Agent": "Mozilla/5.0" },
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
-
-      if (res.ok) {
-        const html = await res.text();
-        const followers = extractFollowerCountFromHtml(html);
-        if (followers !== null) {
-          console.log(
-            `[TikTok Monitor] Embed proxy ${proxy.name} OK — followers: ${followers}`
-          );
-          return followers;
-        }
-      } else {
-        console.log(
-          `[TikTok Monitor] Embed proxy ${proxy.name} — HTTP ${res.status}`
-        );
-      }
-    } catch (e) {
-      console.log(
-        `[TikTok Monitor] Embed proxy ${proxy.name} — erreur: ${e.message}`
-      );
-    }
-  }
-
-  return null;
-}
-
-async function fetchFollowersFromUrlebird() {
-  const profileUrl = `https://urlebird.com/user/${CONFIG.username}/`;
-
-  try {
-    console.log(`[TikTok Monitor] Essai followers via Urlebird`);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
-    const res = await fetch(profileUrl, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
-        Accept: "text/html",
-      },
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-
-    if (res.ok) {
-      const html = await res.text();
-      if (html.length < 500) return null;
-
-      // Chercher les followers dans le HTML
-      const followerMatch = html.match(
-        /(\d[\d,.]*\d*)\s*(?:followers|abonnes|subscribers)/i
-      );
-      if (followerMatch) {
-        return parseInt(followerMatch[1].replace(/[,.]/g, ""), 10);
-      }
-    } else {
-      console.log(`[TikTok Monitor] Urlebird — HTTP ${res.status}`);
-    }
-  } catch (e) {
-    console.log(`[TikTok Monitor] Urlebird — erreur: ${e.message}`);
-  }
-
-  return null;
-}
-
-function extractFollowerCountFromHtml(html) {
+function extractFollowerDataFromHtml(html) {
   if (!html || html.length < 500) return null;
 
   // Vérifier que c'est pas une page Cloudflare
@@ -425,28 +438,23 @@ function extractFollowerCountFromHtml(html) {
     "Attention Required",
     "challenge-platform",
   ];
-  if (challengeSigns.some((s) => html.includes(s)) && html.length < 80000) {
+  if (
+    challengeSigns.some((s) => html.includes(s)) &&
+    html.length < 80000
+  ) {
     return null;
   }
 
-  // Regex : chercher "followerCount":28 dans le HTML
+  // Regex : "followerCount":28 dans le HTML
   const followerMatch = html.match(/"followerCount"\s*:\s*(\d+)/);
-  if (followerMatch) {
-    return parseInt(followerMatch[1], 10);
-  }
+  const likesMatch = html.match(/"heartCount"\s*:\s*(\d+)/);
 
-  // Fallback : chercher dans le JSON embarqué
-  // __UNIVERSAL_DATA_FOR_REHYDRATION__
-  try {
-    const universalMatch = html.match(
-      /<script\s+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>\s*([\s\S]*?)\s*<\/script>/
-    );
-    if (universalMatch) {
-      const data = JSON.parse(universalMatch[1]);
-      const fc = deepFindFollowerCount(data, 0);
-      if (fc !== null) return fc;
-    }
-  } catch (e) {}
+  if (followerMatch) {
+    return {
+      followers: parseInt(followerMatch[1], 10),
+      likes: likesMatch ? parseInt(likesMatch[1], 10) : null,
+    };
+  }
 
   // Fallback : __FRONTITY_CONNECT_STATE__
   try {
@@ -455,35 +463,98 @@ function extractFollowerCountFromHtml(html) {
     );
     if (frontityMatch) {
       const data = JSON.parse(frontityMatch[1]);
-      const fc = deepFindFollowerCount(data, 0);
-      if (fc !== null) return fc;
+      return deepFindFollowerData(data, 0);
+    }
+  } catch (e) {}
+
+  // Fallback : __UNIVERSAL_DATA_FOR_REHYDRATION__
+  try {
+    const universalMatch = html.match(
+      /<script\s+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>\s*([\s\S]*?)\s*<\/script>/
+    );
+    if (universalMatch) {
+      const data = JSON.parse(universalMatch[1]);
+      return deepFindFollowerData(data, 0);
     }
   } catch (e) {}
 
   return null;
 }
 
-function deepFindFollowerCount(obj, depth) {
+function deepFindFollowerData(obj, depth) {
   if (depth > 20 || !obj || typeof obj !== "object") return null;
 
   if (Array.isArray(obj)) {
     for (const item of obj) {
-      const r = deepFindFollowerCount(item, depth + 1);
+      const r = deepFindFollowerData(item, depth + 1);
       if (r !== null) return r;
     }
     return null;
   }
 
+  let followers = null;
+  let likes = null;
   for (const key of Object.keys(obj)) {
     const val = obj[key];
     if (key === "followerCount" && typeof val === "number" && val >= 0) {
-      return val;
+      followers = val;
     }
+    if (key === "heartCount" && typeof val === "number" && val >= 0) {
+      likes = val;
+    }
+  }
+  if (followers !== null) {
+    return { followers, likes };
+  }
+
+  for (const key of Object.keys(obj)) {
+    const val = obj[key];
     if (val && typeof val === "object") {
-      const r = deepFindFollowerCount(val, depth + 1);
+      const r = deepFindFollowerData(val, depth + 1);
       if (r !== null) return r;
     }
   }
+  return null;
+}
+
+// ======================================================
+// FOLLOWERS — Fonction principale
+// ======================================================
+
+async function fetchFollowers() {
+  // Cache : ne pas re-demander si récent
+  if (
+    cachedFollowers !== null &&
+    Date.now() - followersTimestamp < CONFIG.followersCacheMs
+  ) {
+    console.log(
+      `[TikTok Monitor] Followers en cache: ${cachedFollowers} abonnés, ${cachedLikes} likes`
+    );
+    return { followers: cachedFollowers, likes: cachedLikes };
+  }
+
+  // SOURCE 1 : Microlink API (fiable, fonctionne depuis Render)
+  const microlinkResult = await fetchFollowersFromMicrolink();
+  if (microlinkResult !== null) {
+    cachedFollowers = microlinkResult.followers;
+    cachedLikes = microlinkResult.likes;
+    followersTimestamp = Date.now();
+    return microlinkResult;
+  }
+
+  // SOURCE 2 : Embed direct TikTok (peut marcher parfois)
+  const embedResult = await fetchFollowersFromEmbed();
+  if (embedResult !== null) {
+    cachedFollowers = embedResult.followers;
+    cachedLikes = embedResult.likes;
+    followersTimestamp = Date.now();
+    return embedResult;
+  }
+
+  // Aucune source n'a fonctionné
+  console.log(
+    `[TikTok Monitor] Followers: aucune source n'a fonctionné — N/A`
+  );
   return null;
 }
 
@@ -495,23 +566,34 @@ async function sendVideoNotification(guild, videoId) {
   const videoUrl = `https://www.tiktok.com/@${CONFIG.username}/video/${videoId}`;
 
   // Récupérer les followers pour l'embed
-  const followers = await fetchFollowers();
+  const followerData = await fetchFollowers();
   const followerText =
-    followers !== null ? `${followers} abonnés` : "";
+    followerData && followerData.followers !== null
+      ? `${followerData.followers} abonnés`
+      : "";
+  const likesText =
+    followerData && followerData.likes !== null
+      ? `${followerData.likes} likes`
+      : "";
+
+  const statsLine =
+    followerText || likesText
+      ? `\n\n📊 **${followerText}${followerText && likesText ? " • " : ""}${likesText}**`
+      : "";
 
   if (CONFIG.webhookUrl) {
     try {
       const embed = {
-        title: "Nouvelle vidéo TikTok !",
+        title: "🎬 Nouvelle vidéo TikTok !",
         url: videoUrl,
         color: 0x00f2ea,
         description:
           `**@${CONFIG.username}** vient de poster une nouvelle vidéo !\n` +
           `Va la regarder 🔥` +
-          (followerText ? `\n\n📊 **${followerText}**` : ""),
+          statsLine,
         timestamp: new Date().toISOString(),
         footer: {
-          text: "TikTok Monitor v5",
+          text: "TikTok Monitor v6",
         },
       };
 
@@ -525,7 +607,7 @@ async function sendVideoNotification(guild, videoId) {
         }),
       });
       console.log(
-        `[TikTok Monitor] Notification webhook envoyee ! Video: ${videoId}`
+        `[TikTok Monitor] Notification webhook envoyée ! Vidéo: ${videoId}`
       );
       return;
     } catch (err) {
@@ -544,16 +626,16 @@ async function sendVideoNotification(guild, videoId) {
   }
 
   const embed = new EmbedBuilder()
-    .setTitle("Nouvelle vidéo TikTok !")
+    .setTitle("🎬 Nouvelle vidéo TikTok !")
     .setURL(videoUrl)
     .setColor(0x00f2ea)
     .setDescription(
       `**@${CONFIG.username}** vient de poster une nouvelle vidéo !\n` +
         `Va la regarder 🔥` +
-        (followerText ? `\n\n📊 **${followerText}**` : "")
+        statsLine
     )
     .setTimestamp()
-    .setFooter({ text: "TikTok Monitor v5" });
+    .setFooter({ text: "TikTok Monitor v6" });
 
   try {
     await channel.send({
@@ -561,7 +643,7 @@ async function sendVideoNotification(guild, videoId) {
       embeds: [embed],
     });
     console.log(
-      `[TikTok Monitor] Notification bot envoyee ! Video: ${videoId}`
+      `[TikTok Monitor] Notification bot envoyée ! Vidéo: ${videoId}`
     );
   } catch (err) {
     console.error(`[TikTok Monitor] Erreur envoi: ${err.message}`);
@@ -576,7 +658,7 @@ async function monitorLoop() {
   if (!client) return;
 
   try {
-    // 1) Chercher les vidéos via RSSHub
+    // 1) Chercher les vidéos
     const videoResult = await fetchVideoIds();
 
     if (videoResult && videoResult.videoIds.size > 0) {
@@ -592,7 +674,7 @@ async function monitorLoop() {
       if (newIds.length === 0) {
         console.log("[TikTok Monitor] Pas de nouvelle vidéo");
       } else if (knownVideoIds.size === 0) {
-        // Premier lancement : on enregistre tout sans notifier
+        // Premier lancement : enregistrer tout sans notifier
         for (const id of newIds) {
           knownVideoIds.add(id);
         }
@@ -604,7 +686,7 @@ async function monitorLoop() {
         // Vraies nouvelles vidéos !
         for (const id of newIds) {
           console.log(
-            `[TikTok Monitor] Nouvelle vidéo détectée ! ID: ${id}`
+            `[TikTok Monitor] 🎬 Nouvelle vidéo détectée ! ID: ${id}`
           );
           knownVideoIds.add(id);
           const guild = client.guilds.cache.values().next().value;
@@ -635,16 +717,18 @@ async function monitorLoop() {
     }
 
     // 2) Mettre à jour les followers en arrière-plan
-    // (même si pas de nouvelle vidéo, on garde le compteur à jour)
+    // (seulement si le cache est expiré)
     try {
-      const followers = await fetchFollowers();
-      if (followers !== null) {
+      const followerData = await fetchFollowers();
+      if (followerData) {
         console.log(
-          `[TikTok Monitor] Compteur followers: ${followers}`
+          `[TikTok Monitor] Compteur: ${followerData.followers} abonnés, ${followerData.likes || "?"} likes`
         );
       }
     } catch (e) {
-      console.log(`[TikTok Monitor] Mise à jour followers échouée: ${e.message}`);
+      console.log(
+        `[TikTok Monitor] Mise à jour followers échouée: ${e.message}`
+      );
     }
   } catch (e) {
     console.error(`[TikTok Monitor] Erreur boucle: ${e.message}`);
@@ -656,12 +740,67 @@ async function monitorLoop() {
 // ======================================================
 
 async function handleFollowersCommand(interaction) {
-  const followers = await fetchFollowers();
-  const text =
-    followers !== null
-      ? `📊 **@${CONFIG.username}** a actuellement **${followers}** abonnés sur TikTok !`
-      : `❌ Impossible de récupérer le nombre d'abonnés pour le moment. Toutes les sources ont échoué.`;
+  // Pour la commande, on force un refresh (pas de cache)
+  // mais on utilise Microlink directement pour ne pas
+  // gaspiller les requêtes gratuites
+  try {
+    const url = `https://api.microlink.io/?url=https://www.tiktok.com/@${CONFIG.username}`;
+    const res = await fetchWithRetry(
+      url,
+      { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 15000 },
+      1
+    );
+    if (res.ok) {
+      const data = await res.json();
+      if (data.status === "success" && data.data) {
+        const desc = data.data.description || "";
+        const followerMatch = desc.match(
+          /(\d[\d,]*)\s+Followers/i
+        );
+        const likesMatch = desc.match(
+          /(\d[\d,]*)\s+Likes/i
+        );
+        if (followerMatch) {
+          const followers = parseInt(
+            followerMatch[1].replace(/,/g, ""),
+            10
+          );
+          const likes = likesMatch
+            ? parseInt(likesMatch[1].replace(/,/g, ""), 10)
+            : null;
+          // Mettre à jour le cache aussi
+          cachedFollowers = followers;
+          cachedLikes = likes;
+          followersTimestamp = Date.now();
 
+          const text =
+            `📊 **@${CONFIG.username}** a actuellement **${followers}** abonnés sur TikTok !` +
+            (likes !== null ? ` (${likes} likes au total)` : "");
+          if (interaction) {
+            await interaction.reply(text).catch(() => {});
+          }
+          return text;
+        }
+      }
+    }
+  } catch (e) {
+    console.log(`[TikTok Monitor] !followers erreur Microlink: ${e.message}`);
+  }
+
+  // Fallback : utiliser le cache si disponible
+  if (cachedFollowers !== null) {
+    const text =
+      `📊 **@${CONFIG.username}** a actuellement **${cachedFollowers}** abonnés sur TikTok !` +
+      (cachedLikes !== null ? ` (${cachedLikes} likes au total)` : "") +
+      ` _(données en cache)_`;
+    if (interaction) {
+      await interaction.reply(text).catch(() => {});
+    }
+    return text;
+  }
+
+  const text =
+    "❌ Impossible de récupérer le nombre d'abonnés pour le moment. Toutes les sources ont échoué.";
   if (interaction) {
     await interaction.reply(text).catch(() => {});
   }
@@ -678,7 +817,7 @@ function startTikTokMonitor(discordClient) {
   monitorLoop();
   intervalId = setInterval(monitorLoop, CONFIG.checkIntervalMs);
   console.log(
-    `[TikTok Monitor v5] Démarré — vérification toutes les ${
+    `[TikTok Monitor v6] Démarré — vérification toutes les ${
       CONFIG.checkIntervalMs / 1000
     }s`
   );
