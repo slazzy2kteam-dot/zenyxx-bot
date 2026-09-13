@@ -10,7 +10,8 @@ const path = require("path");
 const CONFIG = {
   username: "aetherofficiel",
   channelId: "1548231185015120054", // 📺・tiktok
-  webhookUrl: "https://discord.com/api/webhooks/1548544268371623996/syygwOcpQdd2GLszvp4JHEjB3_lRS60lMEMbRnMvhWdXBYHZ2hl9As0A4tAm0JuPg5XB",
+  webhookUrl:
+    "https://discord.com/api/webhooks/1548544268371623996/syygwOcpQdd2GLszvp4JHEjB3_lRS60lMEMbRnMvhWdXBYHZ2hl9As0A4tAm0JuPg5XB",
   checkIntervalMs: 2 * 60 * 1000, // 2 minutes
   maxFailures: 10,
   knownIdsFile: path.join(__dirname, "tiktok-known-ids.json"),
@@ -35,6 +36,10 @@ const HTML_CACHE_TTL = 100 * 1000; // 100 secondes
 // Derniers followers connus (pour le compteur)
 let cachedFollowers = null;
 
+// Verrou anti-concurrence : une seule requête TikTok à la fois
+let fetchInProgress = false;
+let fetchPromise = null;
+
 // ======================================================
 // CHARGEMENT / SAUVEGARDE DES IDs
 // ======================================================
@@ -44,7 +49,9 @@ function loadKnownIds() {
     if (fs.existsSync(CONFIG.knownIdsFile)) {
       const data = JSON.parse(fs.readFileSync(CONFIG.knownIdsFile, "utf8"));
       knownVideoIds = new Set(data);
-      console.log(`[TikTok Monitor] 📂 ${knownVideoIds.size} IDs déjà connus chargés`);
+      console.log(
+        `[TikTok Monitor] 📂 ${knownVideoIds.size} IDs déjà connus chargés`
+      );
     }
   } catch (e) {
     console.error(`[TikTok Monitor] Erreur chargement IDs: ${e.message}`);
@@ -53,7 +60,11 @@ function loadKnownIds() {
 
 function saveKnownIds() {
   try {
-    fs.writeFileSync(CONFIG.knownIdsFile, JSON.stringify([...knownVideoIds]), "utf8");
+    fs.writeFileSync(
+      CONFIG.knownIdsFile,
+      JSON.stringify([...knownVideoIds]),
+      "utf8"
+    );
   } catch (e) {
     console.error(`[TikTok Monitor] Erreur sauvegarde IDs: ${e.message}`);
   }
@@ -102,46 +113,6 @@ function extractFollowersFromTikTokHtml(html) {
 }
 
 // ======================================================
-// SOURCES — ordre de priorité
-// ======================================================
-
-const TIKTOK_SOURCES = [
-  {
-    name: "embed-direct",
-    buildUrl: (u) => `https://www.tiktok.com/embed/@${u}`,
-    extractVideos: extractAllVideosFromTikTokHtml,
-    extractFollowers: extractFollowersFromTikTokHtml,
-    useProxy: false, // Requête directe
-  },
-  {
-    name: "embed-allorigins",
-    buildUrl: (u) => `https://www.tiktok.com/embed/@${u}`,
-    extractVideos: extractAllVideosFromTikTokHtml,
-    extractFollowers: extractFollowersFromTikTokHtml,
-    useProxy: true,
-    proxyUrl: (url) =>
-      `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-  },
-  {
-    name: "urlebird",
-    buildUrl: (u) => `https://urlebird.com/user/${u}/`,
-    extractVideos: (html) => {
-      const ids = new Set();
-      const matches = html.match(/video\/(\d{10,})/g);
-      if (matches) {
-        for (const m of matches) {
-          const id = m.match(/video\/(\d{10,})/);
-          if (id) ids.add(id[1]);
-        }
-      }
-      return ids.size > 0 ? ids : null;
-    },
-    extractFollowers: null,
-    useProxy: false,
-  },
-];
-
-// ======================================================
 // VALIDATION DE PAGE
 // ======================================================
 
@@ -154,16 +125,42 @@ function isValidPage(html) {
 }
 
 // ======================================================
+// SOURCES — ordre de priorité
+// ======================================================
+
+const TIKTOK_SOURCES = [
+  {
+    name: "embed-direct",
+    buildUrl: (u) => `https://www.tiktok.com/embed/@${u}`,
+    extractVideos: extractAllVideosFromTikTokHtml,
+    extractFollowers: extractFollowersFromTikTokHtml,
+    useProxy: false,
+  },
+  {
+    name: "embed-allorigins",
+    buildUrl: (u) => `https://www.tiktok.com/embed/@${u}`,
+    extractVideos: extractAllVideosFromTikTokHtml,
+    extractFollowers: extractFollowersFromTikTokHtml,
+    useProxy: true,
+    proxyUrl: (url) =>
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  },
+];
+
+// ======================================================
 // FETCH — direct en priorité, proxy en secours
 // ======================================================
 
 async function fetchHtml(url, useProxy, proxyUrlFn) {
-  // 1) Requête directe en priorité
+  // 1) Requête directe
   if (!useProxy) {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 20000);
-      const res = await fetch(url, { headers: HEADERS, signal: controller.signal });
+      const res = await fetch(url, {
+        headers: HEADERS,
+        signal: controller.signal,
+      });
       clearTimeout(timeout);
       if (res.ok) {
         const html = await res.text();
@@ -171,7 +168,9 @@ async function fetchHtml(url, useProxy, proxyUrlFn) {
           return html;
         }
       }
-      console.log(`[TikTok Monitor] Direct — HTTP ${res.status}`);
+      console.log(
+        `[TikTok Monitor] Direct — HTTP ${res.status}`
+      );
     } catch (e) {
       console.log(`[TikTok Monitor] Direct échoué: ${e.message}`);
     }
@@ -183,7 +182,10 @@ async function fetchHtml(url, useProxy, proxyUrlFn) {
     const proxyUrl = proxyUrlFn(url);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 20000);
-    const res = await fetch(proxyUrl, { headers: HEADERS, signal: controller.signal });
+    const res = await fetch(proxyUrl, {
+      headers: HEADERS,
+      signal: controller.signal,
+    });
     clearTimeout(timeout);
     if (res.ok) {
       const html = await res.text();
@@ -191,32 +193,65 @@ async function fetchHtml(url, useProxy, proxyUrlFn) {
         return html;
       }
     }
-    console.log(`[TikTok Monitor] Proxy — HTTP ${res.status}`);
+    console.log(
+      `[TikTok Monitor] Proxy — HTTP ${res.status}`
+    );
   } catch (e) {
     console.log(`[TikTok Monitor] Proxy erreur: ${e.message}`);
-  }
+    }
   return null;
 }
 
 // ======================================================
-// FETCH GLOBAL — avec cache partagé
+// FETCH GLOBAL — avec cache + verrou anti-concurrence
 // ======================================================
 
 async function fetchTikTokPage() {
+  // Verrou anti-concurrence : si une requête est déjà en cours,
+  // on attend le même résultat au lieu d'en lancer une autre
+  if (fetchInProgress && fetchPromise) {
+    console.log(
+      `[TikTok Monitor] ⏳ Requête déjà en cours — on attend le résultat`
+    );
+    return fetchPromise;
+  }
+
   // Vérifier le cache
   if (cachedHtml && Date.now() - cachedHtmlTime < HTML_CACHE_TTL) {
     console.log(
-      `[TikTok Monitor] ♻️ Cache HTML (${Math.round((Date.now() - cachedHtmlTime) / 1000)}s)`
+      `[TikTok Monitor] ♻️ Cache HTML (${Math.round(
+        (Date.now() - cachedHtmlTime) / 1000
+      )}s)`
     );
     return cachedHtml;
   }
 
+  // Lancer la requête
+  fetchInProgress = true;
+  fetchPromise = _doFetchTikTokPage();
+
+  try {
+    const result = await fetchPromise;
+    return result;
+  } finally {
+    fetchInProgress = false;
+    fetchPromise = null;
+  }
+}
+
+async function _doFetchTikTokPage() {
   for (const source of TIKTOK_SOURCES) {
     const url = source.buildUrl(CONFIG.username);
     console.log(`[TikTok Monitor] 🔄 Source: ${source.name}`);
-    const html = await fetchHtml(url, source.useProxy, source.proxyUrl);
+    const html = await fetchHtml(
+      url,
+      source.useProxy,
+      source.proxyUrl
+    );
     if (html) {
-      console.log(`[TikTok Monitor] ✅ ${source.name} — ${html.length} chars`);
+      console.log(
+        `[TikTok Monitor] ✅ ${source.name} — ${html.length} chars`
+      );
       // Mettre en cache
       cachedHtml = html;
       cachedHtmlTime = Date.now();
@@ -227,7 +262,6 @@ async function fetchTikTokPage() {
       return html;
     }
   }
-
   return null;
 }
 
@@ -256,10 +290,13 @@ async function checkLatestVideos() {
 async function checkFollowers() {
   // Si on a les followers en cache, les retourner directement
   if (cachedFollowers !== null) {
+    console.log(
+      `[TikTok Monitor] ♻️ Followers en cache: ${cachedFollowers}`
+    );
     return cachedFollowers;
   }
 
-  // Sinon, faire une requête
+  // Sinon, faire une requête (partagée via verrou)
   const html = await fetchTikTokPage();
   if (!html) return null;
 
@@ -301,16 +338,22 @@ async function sendVideoNotification(guild, videoId) {
           embeds: [embed],
         }),
       });
-      console.log(`[TikTok Monitor] 📢 Notification webhook envoyée ! Vidéo: ${videoId}`);
+      console.log(
+        `[TikTok Monitor] 📢 Notification webhook envoyée ! Vidéo: ${videoId}`
+      );
       return;
     } catch (err) {
-      console.error(`[TikTok Monitor] Erreur webhook: ${err.message} — fallback via bot`);
+      console.error(
+        `[TikTok Monitor] Erreur webhook: ${err.message} — fallback via bot`
+      );
     }
   }
 
   const channel = guild.channels.cache.get(CONFIG.channelId);
   if (!channel) {
-    console.error(`[TikTok Monitor] Salon introuvable — ID: ${CONFIG.channelId}`);
+    console.error(
+      `[TikTok Monitor] Salon introuvable — ID: ${CONFIG.channelId}`
+    );
     return;
   }
 
@@ -329,7 +372,9 @@ async function sendVideoNotification(guild, videoId) {
       content: `@everyone **Nouvelle vidéo TikTok !** @${CONFIG.username} vient de poster !\n${videoUrl}`,
       embeds: [embed],
     });
-    console.log(`[TikTok Monitor] 📢 Notification bot envoyée ! Vidéo: ${videoId}`);
+    console.log(
+      `[TikTok Monitor] 📢 Notification bot envoyée ! Vidéo: ${videoId}`
+    );
   } catch (err) {
     console.error(`[TikTok Monitor] Erreur envoi: ${err.message}`);
   }
