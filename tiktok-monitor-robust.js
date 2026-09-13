@@ -8,6 +8,7 @@ const { EmbedBuilder } = require("discord.js");
 const CONFIG = {
   username: "aetherofficiel",
   channelId: "1548231185015120054", // 📺・tiktok
+  webhookUrl: "https://discord.com/api/webhooks/1548544268371623996/syygwOcpQdd2GLszvp4JHEjB3_lRS60lMEMbRnMvhWdXBYHZ2hl9As0A4tAm0JuPg5XB",
   checkIntervalMs: 2 * 60 * 1000, // 2 minutes
   maxFailures: 10,
 };
@@ -235,13 +236,42 @@ async function checkFollowers() {
 // ======================================================
 
 async function sendVideoNotification(guild, videoId) {
+  const videoUrl = `https://www.tiktok.com/@${CONFIG.username}/video/${videoId}`;
+
+  // Utiliser le webhook pour un look "TikTok" propre
+  if (CONFIG.webhookUrl) {
+    try {
+      const embed = {
+        title: "🎬 Nouvelle vidéo TikTok !",
+        url: videoUrl,
+        color: 0x00f2ea,
+        description: `**@${CONFIG.username}** vient de poster une nouvelle vidéo !\nVa la regarder 🔥`,
+        timestamp: new Date().toISOString(),
+      };
+
+      await fetch(CONFIG.webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: "TikTok",
+          avatar_url: "https://cdn.pixabay.com/photo/2021/02/01/13/41/tiktok-5971185_1280.png",
+          content: `@everyone **Nouvelle vidéo TikTok !** @${CONFIG.username} vient de poster !\n${videoUrl}`,
+          embeds: [embed],
+        }),
+      });
+      console.log(`[TikTok Monitor] 📢 Notification webhook envoyée ! Vidéo: ${videoId}`);
+      return;
+    } catch (err) {
+      console.error(`[TikTok Monitor] Erreur webhook: ${err.message} — fallback via bot`);
+    }
+  }
+
+  // Fallback : envoyer via le bot si le webhook échoue
   const channel = guild.channels.cache.get(CONFIG.channelId);
   if (!channel) {
     console.error(`[TikTok Monitor] Salon introuvable — ID: ${CONFIG.channelId}`);
     return;
   }
-
-  const videoUrl = `https://www.tiktok.com/@${CONFIG.username}/video/${videoId}`;
 
   const embed = new EmbedBuilder()
     .setTitle("🎬 Nouvelle vidéo TikTok !")
@@ -258,7 +288,7 @@ async function sendVideoNotification(guild, videoId) {
       content: `@everyone **Nouvelle vidéo TikTok !** @${CONFIG.username} vient de poster !\n${videoUrl}`,
       embeds: [embed],
     });
-    console.log(`[TikTok Monitor] 📢 Notification envoyée ! Vidéo: ${videoId}`);
+    console.log(`[TikTok Monitor] 📢 Notification bot envoyée ! Vidéo: ${videoId}`);
   } catch (err) {
     console.error(`[TikTok Monitor] Erreur envoi: ${err.message}`);
   }
