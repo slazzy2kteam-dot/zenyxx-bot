@@ -24,10 +24,18 @@ let consecutiveFailures = 0;
 let intervalId = null;
 let client = null;
 
-// Set des IDs de vidéos déjà notifiées (survit aux redémarrages via fichier)
+// Set des IDs de vidéos déjà notifiées
 let knownVideoIds = new Set();
 
-// Charger les IDs connus depuis le fichier
+// Cache HTML partagé — évite de faire 2 requêtes pour vidéo + followers
+let cachedHtml = null;
+let cachedHtmlTime = 0;
+const HTML_CACHE_TTL = 90 * 1000; // 90 secondes
+
+// ======================================================
+// CHARGEMENT / SAUVEGARDE DES IDs
+// ======================================================
+
 function loadKnownIds() {
   try {
     if (fs.existsSync(CONFIG.knownIdsFile)) {
@@ -40,7 +48,6 @@ function loadKnownIds() {
   }
 }
 
-// Sauvegarder les IDs connus dans le fichier
 function saveKnownIds() {
   try {
     fs.writeFileSync(CONFIG.knownIdsFile, JSON.stringify([...knownVideoIds]), "utf8");
@@ -50,7 +57,7 @@ function saveKnownIds() {
 }
 
 // ======================================================
-// PROXIES + SOURCES
+// PROXIES — plus de diversité
 // ======================================================
 
 const PROXIES = [
@@ -58,6 +65,12 @@ const PROXIES = [
     name: "allorigins",
     buildUrl: (url) =>
       `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  },
+  {
+    name: "allorigins-get",
+    buildUrl: (url) =>
+      `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
+    isJson: true,
   },
   {
     name: "corsproxy",
@@ -69,6 +82,16 @@ const PROXIES = [
     buildUrl: (url) =>
       `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
   },
+  {
+    name: "jsonp-afeld",
+    buildUrl: (url) =>
+      `https://jsonp.afeld.me/?url=${encodeURIComponent(url)}`,
+  },
+  {
+    name: "thingproxy",
+    buildUrl: (url) =>
+      `https://thingproxy.freeboard.io/fetch/${url}`,
+  },
 ];
 
 const HEADERS = {
@@ -79,7 +102,7 @@ const HEADERS = {
   "Accept-Language": "en-US,en;q=0.9",
 };
 
-// Sources TikTok — on essaie dans l'ordre
+// Sources TikTok
 const TIKTOK_SOURCES = [
   {
     name: "embed",
@@ -93,13 +116,11 @@ const TIKTOK_SOURCES = [
     extractVideos: extractAllVideosFromTikTokHtml,
     extractFollowers: extractFollowersFromTikTokHtml,
   },
-  // urlebird = site tiers qui affiche les profils TikTok
-  // souvent pas bloqué depuis les datacenters
   {
     name: "urlebird",
     buildUrl: (u) => `https://urlebird.com/user/${u}/`,
     extractVideos: extractAllVideosFromUrlebird,
-    extractFollowers: null, // pas fiable sur urlebird
+    extractFollowers: null,
   },
 ];
 
@@ -110,7 +131,6 @@ const TIKTOK_SOURCES = [
 function extractAllVideosFromTikTokHtml(html) {
   const ids = new Set();
 
-  // Méthode 1 : video/7684717468039908631 dans les URLs
   const urlMatches = html.match(/video\/(\d{10,})/g);
   if (urlMatches) {
     for (const m of urlMatches) {
@@ -119,7 +139,6 @@ function extractAllVideosFromTikTokHtml(html) {
     }
   }
 
-  // Méthode 2 : "id":"7684717468039908631" dans le JSON
   const idMatches = html.match(/"id":"(\d{15,})"/g);
   if (idMatches) {
     for (const m of idMatches) {
@@ -153,26 +172,33 @@ function extractAllVideosFromUrlebird(html) {
 }
 
 // ======================================================
-// FETCH VIA PROXY — avec validation intelligente
+// VALIDATION DE PAGE
 // ======================================================
 
 function isValidPage(html) {
   if (!html || html.length < 500) return false;
-  // Les pages CAPTCHA font généralement < 20KB
-  // Si la page fait > 50KB, c'est presque certainement du vrai contenu
   if (html.length > 50000) return true;
-  // Pour les pages plus petites, vérifier les signes de CAPTCHA
   if (html.includes("Just a moment") && html.length < 10000) return false;
   if (html.includes("cf-challenge") && html.length < 10000) return false;
   return true;
 }
 
+// ======================================================
+// FETCH VIA PROXY — avec cache partagé
+// ======================================================
+
 async function fetchViaProxy(targetUrl) {
+  // Vérifier le cache
+  if (cachedHtml && Date.now() - cachedHtmlTime < HTML_CACHE_TTL) {
+    console.log(`[TikTok Monitor] ♻️ Cache HTML utilisé (${cachedHtml.length} chars, âge: ${Math.round((Date.now() - cachedHtmlTime) / 1000)}s)`);
+    return cachedHtml;
+  }
+
   for (const proxy of PROXIES) {
     try {
       const proxyUrl = proxy.buildUrl(targetUrl);
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
+      const timeout = setTimeout(() => controller.abort(), 20000); // 20s timeout
 
       const res = await fetch(proxyUrl, {
         headers: HEADERS,
@@ -181,11 +207,21 @@ async function fetchViaProxy(targetUrl) {
       clearTimeout(timeout);
 
       if (res.ok) {
-        const html = await res.text();
+        let html;
+        if (proxy.isJson) {
+          // allorigins-get retourne {contents: "..."}
+          const json = await res.json();
+          html = json.contents || "";
+        } else {
+          html = await res.text();
+        }
         if (isValidPage(html)) {
           console.log(
             `[TikTok Monitor] ✅ Proxy ${proxy.name} — ${html.length} chars`
           );
+          // Mettre en cache
+          cachedHtml = html;
+          cachedHtmlTime = Date.now();
           return html;
         }
         console.log(
@@ -202,13 +238,15 @@ async function fetchViaProxy(targetUrl) {
   // Dernier recours : requête directe
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
+    const timeout = setTimeout(() => controller.abort(), 20000);
     const res = await fetch(targetUrl, { headers: HEADERS, signal: controller.signal });
     clearTimeout(timeout);
     if (res.ok) {
       const html = await res.text();
       if (isValidPage(html)) {
         console.log(`[TikTok Monitor] ✅ Direct — ${html.length} chars`);
+        cachedHtml = html;
+        cachedHtmlTime = Date.now();
         return html;
       }
     }
@@ -221,7 +259,7 @@ async function fetchViaProxy(targetUrl) {
 }
 
 // ======================================================
-// VÉRIFICATION MULTI-SOURCE
+// VÉRIFICATION VIDÉO + FOLLOWERS — partagent le même HTML
 // ======================================================
 
 async function checkLatestVideos() {
@@ -237,7 +275,6 @@ async function checkLatestVideos() {
         );
         return videoIds;
       }
-      // Page valide mais pas de vidéo trouvée — debug
       console.log(
         `[TikTok Monitor] Source ${source.name} — page OK mais pas d'ID vidéo`
       );
@@ -246,7 +283,6 @@ async function checkLatestVideos() {
   return null;
 }
 
-// Garder pour compatibilité (checkFollowers utilisé par index.js)
 async function checkFollowers() {
   for (const source of TIKTOK_SOURCES) {
     if (!source.extractFollowers) continue;
@@ -272,7 +308,6 @@ async function checkFollowers() {
 async function sendVideoNotification(guild, videoId) {
   const videoUrl = `https://www.tiktok.com/@${CONFIG.username}/video/${videoId}`;
 
-  // Utiliser le webhook pour un look "TikTok" propre
   if (CONFIG.webhookUrl) {
     try {
       const embed = {
@@ -300,7 +335,6 @@ async function sendVideoNotification(guild, videoId) {
     }
   }
 
-  // Fallback : envoyer via le bot si le webhook échoue
   const channel = guild.channels.cache.get(CONFIG.channelId);
   if (!channel) {
     console.error(`[TikTok Monitor] Salon introuvable — ID: ${CONFIG.channelId}`);
@@ -341,7 +375,6 @@ async function monitorLoop() {
     if (videoIds) {
       consecutiveFailures = 0;
 
-      // Trouver les NOUVEAUX IDs qu'on a jamais vus
       const newIds = [];
       for (const id of videoIds) {
         if (!knownVideoIds.has(id)) {
@@ -361,7 +394,7 @@ async function monitorLoop() {
           `[TikTok Monitor] Premier lancement — ${newIds.length} IDs initiaux enregistrés (pas de notification)`
         );
       } else {
-        // Des vraies nouvelles vidéos !
+        // Vraies nouvelles vidéos
         for (const id of newIds) {
           console.log(
             `[TikTok Monitor] 🎬 Nouvelle vidéo détectée ! ID: ${id}`
