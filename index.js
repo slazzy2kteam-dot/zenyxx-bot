@@ -23,12 +23,7 @@ const {
 const { createCanvas, loadImage } = require("@napi-rs/canvas");
 const express = require("express");
 const fs = require("fs");
-// ======================================================
-// NOUVEAU MONITEUR TIKTOK ROBUSTE (3 sources + webhook)
-// ======================================================
 
-const { startTikTokMonitor } = require("./tiktok-monitor-robust");
- 
 // ======================================================
 // SERVEUR HTTP
 // ======================================================
@@ -110,6 +105,7 @@ const CASE_FILE = "./cases.json";
 const MAX_EMBED_FIELD = 1024;
 
 const httpsModule = require("https");
+const { startTikTokMonitor, checkFollowers } = require("./tiktok-monitor-robust");
 
 // ======================================================
 // SYSTÈME NOTIFICATION TWITCH LIVE
@@ -311,6 +307,11 @@ function startTwitchLiveCheck() {
 }
 
 // ======================================================
+// SYSTÈME NOTIFICATION TIKTOK — via tiktok-monitor-robust.js
+// (utilise des proxies gratuits pour contourner le 403 de Render)
+// ======================================================
+
+// ======================================================
 // COMPTEURS DE MEMBRES / ABONNÉS
 // ======================================================
 
@@ -387,41 +388,12 @@ async function updateTikTokCounter(guild) {
   tiktokFetching = true;
   const tiktokChannel = guild.channels.cache.get("1547260849830367334");
   if (!tiktokChannel) {
+    tiktokFetching = false;
     return;
   }
 
-  const username = "aetherofficiel";
   try {
-    const url = `https://www.tiktok.com/@${username}`;
-    const html = await new Promise((resolve, reject) => {
-      httpsModule.get(url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9,fr-FR;q=0.8"
-        }
-      }, res => {
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          httpsModule.get(res.headers.location, {
-            headers: {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-              "Accept-Language": "en-US,en;q=0.9"
-            }
-          }, res2 => {
-            let body = "";
-            res2.on("data", chunk => body += chunk);
-            res2.on("end", () => resolve(body));
-          }).on("error", reject);
-          return;
-        }
-        let body = "";
-        res.on("data", chunk => body += chunk);
-        res.on("end", () => resolve(body));
-      }).on("error", reject);
-    });
-
-    const match = html.match(/"followerCount":(\d+)/);
-    const followers = match ? parseInt(match[1], 10) : null;
+    const followers = await checkFollowers();
 
     if (followers !== null) {
       enqueueCounterUpdate("1547260849830367334", `👥 Abonnés Tiktok : ${followers}`);
@@ -431,7 +403,7 @@ async function updateTikTokCounter(guild) {
   } catch (error) {
     console.error("[Compteur TikTok] Erreur:", error.message);
   } finally {
-    tiktokFetching = false; // Toujours libérer, même en cas d'erreur
+    tiktokFetching = false;
   }
 }
 
@@ -3207,7 +3179,7 @@ client.once(
       // Démarrer la vérification nouvelle vidéo TikTok
       startTikTokMonitor(client);
       console.log(
-        "✅ Moniteur TikTok robuste démarré (3 sources + webhook) !"
+        "✅ Notifications nouvelle vidéo TikTok démarrées !"
       );
 
     } catch (error) {
