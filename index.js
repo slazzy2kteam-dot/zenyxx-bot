@@ -35,6 +35,51 @@ app.get("/", (req, res) => {
   res.send("Bot en ligne !");
 });
 
+// ======================================================
+// TWITCH USER OAUTH CALLBACK
+// ======================================================
+const TWITCH_REDIRECT_URI = process.env.TWITCH_REDIRECT_URI || "https://zenyxx-bot.onrender.com/twitch-callback";
+let twitchUserTokenState = null; // anti-CSRF state
+
+app.get("/twitch-callback", async (req, res) => {
+  const { code, state } = req.query;
+  if (!code) {
+    return res.status(400).send("❌ Code d'autorisation manquant.");
+  }
+  if (state !== twitchUserTokenState) {
+    console.error("[Twitch OAuth] State mismatch, possible CSRF");
+    return res.status(403).send("❌ State invalide (possible attaque CSRF).");
+  }
+  try {
+    const tokenRes = await fetch("https://id.twitch.tv/oauth2/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: process.env.TWITCH_CLIENT_ID || "xclqtr46kv5pucivcndsnjflt39xhj",
+        client_secret: process.env.TWITCH_CLIENT_SECRET || "1wwnttex8byncuvkte5ylsx8vkw3ra",
+        code,
+        grant_type: "authorization_code",
+        redirect_uri: TWITCH_REDIRECT_URI
+      }).toString()
+    });
+    const tokenData = await tokenRes.json();
+    if (!tokenData.access_token) {
+      console.error("[Twitch OAuth] Erreur échange token:", JSON.stringify(tokenData));
+      return res.status(400).send("❌ Erreur lors de l'échange du token Twitch: " + JSON.stringify(tokenData));
+    }
+    // Sauvegarder le token utilisateur
+    saveTwitchUserTokens(tokenData.access_token, tokenData.refresh_token, tokenData.expires_in);
+    console.log("[Twitch OAuth] ✅ Token utilisateur obtenu avec succès !");
+    console.log("[Twitch OAuth] ⚠️ AJOUTE CES VALEURS DANS LES VARIABLES D'ENV DE RENDER :");
+    console.log("[Twitch OAuth]   TWITCH_USER_ACCESS_TOKEN=" + tokenData.access_token);
+    console.log("[Twitch OAuth]   TWITCH_USER_REFRESH_TOKEN=" + tokenData.refresh_token);
+    res.send("✅ Twitch autorisé avec succès ! Le compteur d'abonnés va se mettre à jour. Tu peux fermer cette page.");
+  } catch (err) {
+    console.error("[Twitch OAuth] Erreur callback:", err);
+    res.status(500).send("❌ Erreur interne lors de l'autorisation Twitch.");
+  }
+});
+
 app.listen(process.env.PORT || 3000, () => {
   console.log("Serveur HTTP demarre");
 });
@@ -116,7 +161,7 @@ const TWITCH_CLIENT_ID = process.env.TWITCH_CLIENT_ID || "xclqtr46kv5pucivcndsnj
 const TWITCH_CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET || "1wwnttex8byncuvkte5ylsx8vkw3ra";
 const TWITCH_USERNAME = "zenyxxtw";
 const TWITCH_NOTIFY_CHANNEL_ID = "1548388049669455972"; // 📺・twitch
-const TWITCH_WEBHOOK_URL = "https://discord.com/api/webhooks/1548571591267459133/skEqb06FOW8rFqVF7L2N-VCL7Oyo74lqOnl8RWZXnLb5r7LVPSdxX5q36aiDZvHZ2mDC";
+const TWITCH_WEBHOOK_URL = "https://discord.com/api/webhooks/1548653848535507036/r7g6rAnCkLg8ieOj2yX5rA7yi8KKYcuM7Fpptw7TePRTMOWg474TP2B0dqnSTBQ_kkY4";
 const TWITCH_CHECK_INTERVAL_MS = 60 * 1000; // 1 minute
 
 let twitchAccessToken = null;
@@ -172,6 +217,118 @@ async function getTwitchToken() {
     req.write(postData);
     req.end();
   });
+}
+
+// ======================================================
+// TWITCH USER OAUTH - POUR LE COMPTEUR D'ABONNÉS
+// L'endpoint /helix/channels/followers nécessite un
+// user token avec scope moderator:read:followers
+// ======================================================
+const TWITCH_USER_TOKENS_FILE = "./twitch_user_tokens.json";
+let twitchUserAccessToken = null;
+let twitchUserRefreshToken = null;
+let twitchUserTokenExpiry = 0;
+
+function loadTwitchUserTokens() {
+  // 1. Essayer le fichier local
+  try {
+    if (fs.existsSync(TWITCH_USER_TOKENS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(TWITCH_USER_TOKENS_FILE, "utf8"));
+      if (data.access_token && data.refresh_token) {
+        twitchUserAccessToken = data.access_token;
+        twitchUserRefreshToken = data.refresh_token;
+        twitchUserTokenExpiry = data.expiry || 0;
+        console.log("[Twitch User] ✅ Token chargé depuis le fichier");
+        return;
+      }
+    }
+  } catch (e) {
+    console.error("[Twitch User] Erreur lecture fichier token:", e.message);
+  }
+  // 2. Fallback : variables d'environnement (persistant sur Render)
+  if (process.env.TWITCH_USER_ACCESS_TOKEN && process.env.TWITCH_USER_REFRESH_TOKEN) {
+    twitchUserAccessToken = process.env.TWITCH_USER_ACCESS_TOKEN;
+    twitchUserRefreshToken = process.env.TWITCH_USER_REFRESH_TOKEN;
+    twitchUserTokenExpiry = parseInt(process.env.TWITCH_USER_TOKEN_EXPIRY || "0", 10);
+    console.log("[Twitch User] ✅ Token chargé depuis les variables d'environnement");
+    return;
+  }
+  console.warn("[Twitch User] ⚠️ Aucun token utilisateur trouvé. Le compteur d'abonnés Twitch ne fonctionnera pas. Utilise /twitch-auth pour autoriser.");
+}
+
+function saveTwitchUserTokens(accessToken, refreshToken, expiresIn) {
+  twitchUserAccessToken = accessToken;
+  twitchUserRefreshToken = refreshToken;
+  twitchUserTokenExpiry = Date.now() + (expiresIn - 60) * 1000;
+  // Sauvegarder dans le fichier
+  try {
+    fs.writeFileSync(TWITCH_USER_TOKENS_FILE, JSON.stringify({
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      expiry: twitchUserTokenExpiry
+    }, null, 2));
+    console.log("[Twitch User] ✅ Token sauvegardé dans le fichier");
+  } catch (e) {
+    console.error("[Twitch User] Erreur sauvegarde fichier token:", e.message);
+  }
+  // Loguer les valeurs pour les copier dans les env vars de Render
+  console.log("[Twitch User] ⚠️ AJOUTE DANS LES ENV VARS DE RENDER :");
+  console.log("[Twitch User]   TWITCH_USER_ACCESS_TOKEN=" + accessToken);
+  console.log("[Twitch User]   TWITCH_USER_REFRESH_TOKEN=" + refreshToken);
+  console.log("[Twitch User]   TWITCH_USER_TOKEN_EXPIRY=" + twitchUserTokenExpiry);
+}
+
+async function refreshTwitchUserToken() {
+  if (!twitchUserRefreshToken) {
+    console.error("[Twitch User] Pas de refresh token disponible");
+    return false;
+  }
+  console.log("[Twitch User] 🔄 Rafraîchissement du token utilisateur...");
+  try {
+    const res = await fetch("https://id.twitch.tv/oauth2/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: twitchUserRefreshToken,
+        client_id: TWITCH_CLIENT_ID,
+        client_secret: TWITCH_CLIENT_SECRET
+      }).toString()
+    });
+    const data = await res.json();
+    if (data.access_token) {
+      saveTwitchUserTokens(data.access_token, data.refresh_token || twitchUserRefreshToken, data.expires_in);
+      console.log("[Twitch User] ✅ Token rafraîchi avec succès");
+      return true;
+    } else {
+      console.error("[Twitch User] Erreur refresh token:", JSON.stringify(data));
+      return false;
+    }
+  } catch (e) {
+    console.error("[Twitch User] Erreur refresh:", e.message);
+    return false;
+  }
+}
+
+async function getValidTwitchUserToken() {
+  // 1. Si pas de token du tout, essayer de charger
+  if (!twitchUserAccessToken) {
+    loadTwitchUserTokens();
+    if (!twitchUserAccessToken) {
+      console.warn("[Twitch User] ⚠️ Aucun token utilisateur. Fais /twitch-auth d'abord.");
+      return null;
+    }
+  }
+  // 2. Si le token est expiré, essayer de le rafraîchir
+  if (Date.now() >= twitchUserTokenExpiry) {
+    console.log("[Twitch User] Token expiré, rafraîchissement en cours...");
+    const refreshed = await refreshTwitchUserToken();
+    if (!refreshed) {
+      console.error("[Twitch User] ❌ Impossible de rafraîchir le token. Réautorise avec /twitch-auth.");
+      return null;
+    }
+  }
+  return twitchUserAccessToken;
 }
 
 // Vérifier si le streamer est en live
@@ -468,16 +625,30 @@ let tiktokFetching = false; // Protection anti-empilement
 let twitchCounterFetching = false; // Protection anti-empilement Twitch
 
 async function getTwitchFollowerCount() {
-  const userToken = await getValidTwitchUserToken();
-  if (!userToken) {
-    console.error("[Compteur Twitch] Pas de token utilisateur — va sur /twitch-auth pour autoriser le bot");
+  // L'endpoint /helix/users/follows a été supprimé par Twitch le 2023-09-12.
+  // Il faut utiliser /helix/channels/followers avec un user token (moderator:read:followers).
+  let userToken;
+  try {
+    userToken = await getValidTwitchUserToken();
+    if (!userToken) {
+      console.error("[Compteur Twitch] ❌ Pas de token utilisateur. Utilise /twitch-auth pour autoriser.");
+      return null;
+    }
+  } catch (e) {
+    console.error("[Compteur Twitch] Erreur obtention token utilisateur:", e.message);
     return null;
   }
 
   // Résoudre l'ID utilisateur Twitch si pas encore fait
+  let appToken;
+  try {
+    appToken = await getTwitchToken();
+  } catch (e) {
+    console.error("[Compteur Twitch] Impossible d'obtenir le token app pour résoudre l'ID:", e.message);
+    return null;
+  }
   if (!twitchUserId) {
     try {
-      const appToken = await getTwitchToken();
       twitchUserId = await resolveTwitchUserId(appToken);
       if (!twitchUserId) {
         console.error("[Compteur Twitch] Impossible de résoudre l'ID pour", TWITCH_USERNAME);
@@ -491,6 +662,7 @@ async function getTwitchFollowerCount() {
   }
 
   return new Promise((resolve) => {
+    // NOUVEAU endpoint : /helix/channels/followers?broadcaster_id=<id>
     const options = {
       hostname: "api.twitch.tv",
       path: "/helix/channels/followers?broadcaster_id=" + encodeURIComponent(twitchUserId),
@@ -508,7 +680,12 @@ async function getTwitchFollowerCount() {
         try {
           const data = JSON.parse(body);
           if (data.total !== undefined) {
+            console.log("[Compteur Twitch] ✅ Abonnés:", data.total);
             resolve(data.total);
+          } else if (data.error === "Unauthorized" || data.status === 401) {
+            console.error("[Compteur Twitch] ❌ 401 Unauthorized — token utilisateur invalide. Réautorise avec /twitch-auth.");
+            console.error("[Compteur Twitch] Réponse:", body);
+            resolve(null);
           } else {
             console.error("[Compteur Twitch] Réponse inattendue:", body);
             resolve(null);
@@ -524,6 +701,7 @@ async function getTwitchFollowerCount() {
       console.error("[Compteur Twitch] Erreur requête:", e.message);
       resolve(null);
     });
+    req.end();
   });
 }
 
@@ -562,153 +740,6 @@ async function resolveTwitchUserId(token) {
       console.error("[Compteur Twitch] Erreur requête ID:", e.message);
       resolve(null);
     });
-    req.end();
-  });
-}
-
-// ======================================================
-// TWITCH OAUTH UTILISATEUR (nécessaire pour le nombre d'abonnés
-// depuis que Twitch a fermé l'ancien endpoint public)
-// ======================================================
-
-const TWITCH_TOKENS_FILE = "./twitch_user_tokens.json";
-const TWITCH_REDIRECT_URI = "https://zenyxx-bot.onrender.com/twitch-callback";
-
-function loadTwitchUserTokens() {
-  try {
-    if (!fs.existsSync(TWITCH_TOKENS_FILE)) return null;
-    return JSON.parse(fs.readFileSync(TWITCH_TOKENS_FILE, "utf8"));
-  } catch (e) {
-    console.error("Erreur lecture twitch_user_tokens.json :", e.message);
-    return null;
-  }
-}
-
-function saveTwitchUserTokens(tokens) {
-  try {
-    fs.writeFileSync(TWITCH_TOKENS_FILE, JSON.stringify(tokens, null, 2));
-  } catch (e) {
-    console.error("Erreur écriture twitch_user_tokens.json :", e.message);
-  }
-}
-
-// Visite cette URL une seule fois (connecté avec le compte zenyxxtw) pour autoriser le bot
-app.get("/twitch-auth", (req, res) => {
-  const scope = "moderator:read:followers";
-  const url = `https://id.twitch.tv/oauth2/authorize?client_id=${TWITCH_CLIENT_ID}&redirect_uri=${encodeURIComponent(TWITCH_REDIRECT_URI)}&response_type=code&scope=${encodeURIComponent(scope)}`;
-  res.redirect(url);
-});
-
-// Twitch redirige ici après autorisation
-app.get("/twitch-callback", async (req, res) => {
-  const code = req.query.code;
-  if (!code) return res.send("❌ Autorisation refusée ou code manquant.");
-
-  const postData = new URLSearchParams({
-    client_id: TWITCH_CLIENT_ID,
-    client_secret: TWITCH_CLIENT_SECRET,
-    code,
-    grant_type: "authorization_code",
-    redirect_uri: TWITCH_REDIRECT_URI
-  }).toString();
-
-  try {
-    const tokens = await new Promise((resolve, reject) => {
-      const options = {
-        hostname: "id.twitch.tv",
-        path: "/oauth2/token",
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "Content-Length": Buffer.byteLength(postData)
-        }
-      };
-      const reqTok = httpsModule.request(options, r => {
-        let body = "";
-        r.on("data", c => body += c);
-        r.on("end", () => {
-          try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
-        });
-      });
-      reqTok.on("error", reject);
-      reqTok.write(postData);
-      reqTok.end();
-    });
-
-    if (!tokens.access_token) {
-      console.error("[Twitch OAuth] Échec de l'échange du code :", tokens);
-      return res.send("❌ Échec de l'autorisation. Regarde les logs Render.");
-    }
-
-    saveTwitchUserTokens({
-      access_token: tokens.access_token,
-      refresh_token: tokens.refresh_token,
-      obtained_at: Date.now(),
-      expires_in: tokens.expires_in
-    });
-
-    console.log("✅ [Twitch OAuth] Autorisation réussie, tokens sauvegardés.");
-    res.send("✅ Autorisation Twitch réussie ! Tu peux fermer cette page.");
-  } catch (e) {
-    console.error("[Twitch OAuth] Erreur :", e.message);
-    res.send("❌ Erreur lors de l'autorisation. Regarde les logs Render.");
-  }
-});
-
-// Renvoie un token utilisateur valide, en le rafraîchissant si besoin
-async function getValidTwitchUserToken() {
-  const tokens = loadTwitchUserTokens();
-  if (!tokens) return null;
-
-  const isExpired = Date.now() > (tokens.obtained_at + (tokens.expires_in - 300) * 1000);
-  if (!isExpired) return tokens.access_token;
-
-  const postData = new URLSearchParams({
-    client_id: TWITCH_CLIENT_ID,
-    client_secret: TWITCH_CLIENT_SECRET,
-    grant_type: "refresh_token",
-    refresh_token: tokens.refresh_token
-  }).toString();
-
-  return new Promise((resolve) => {
-    const options = {
-      hostname: "id.twitch.tv",
-      path: "/oauth2/token",
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Content-Length": Buffer.byteLength(postData)
-      }
-    };
-    const req = httpsModule.request(options, res => {
-      let body = "";
-      res.on("data", c => body += c);
-      res.on("end", () => {
-        try {
-          const data = JSON.parse(body);
-          if (data.access_token) {
-            saveTwitchUserTokens({
-              access_token: data.access_token,
-              refresh_token: data.refresh_token || tokens.refresh_token,
-              obtained_at: Date.now(),
-              expires_in: data.expires_in
-            });
-            resolve(data.access_token);
-          } else {
-            console.error("[Twitch OAuth] Échec du rafraîchissement :", body);
-            resolve(null);
-          }
-        } catch (e) {
-          console.error("[Twitch OAuth] Erreur parsing refresh:", e.message);
-          resolve(null);
-        }
-      });
-    });
-    req.on("error", e => {
-      console.error("[Twitch OAuth] Erreur refresh:", e.message);
-      resolve(null);
-    });
-    req.write(postData);
     req.end();
   });
 }
@@ -3526,6 +3557,21 @@ const commands = [
 
     .setDefaultMemberPermissions(
       PermissionFlagsBits.Administrator
+    ),
+
+  // TWITCH AUTH
+  new SlashCommandBuilder()
+
+    .setName(
+      "twitch-auth"
+    )
+
+    .setDescription(
+      "Autorise le bot à accéder à ton compte Twitch pour le compteur d'abonnés"
+    )
+
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.Administrator
     )
 
 ].map(
@@ -3577,6 +3623,7 @@ client.once(
       );
 
       // Démarrer les compteurs de membres / abonnés
+      loadTwitchUserTokens(); // Charger le token utilisateur Twitch pour le compteur d'abonnés
       startCounterInterval();
       console.log(
         "✅ Compteurs de membres / abonnés démarrés !"
@@ -5005,6 +5052,43 @@ client.on(
 
           content:
             "✅ Panneau de tickets envoyé.",
+
+          ephemeral:
+            true
+        });
+
+        return;
+      }
+
+      // ================================================
+      // TWITCH AUTH
+      // ================================================
+
+      if (
+        commandName ===
+        "twitch-auth"
+      ) {
+
+        // Générer un state aléatoire pour la sécurité anti-CSRF
+        twitchUserTokenState = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+
+        const authUrl = "https://id.twitch.tv/oauth2/authorize"
+          + "?response_type=code"
+          + "&client_id=" + encodeURIComponent(TWITCH_CLIENT_ID)
+          + "&redirect_uri=" + encodeURIComponent(TWITCH_REDIRECT_URI)
+          + "&scope=" + encodeURIComponent("moderator:read:followers")
+          + "&state=" + encodeURIComponent(twitchUserTokenState);
+
+        await interaction.reply({
+
+          content:
+            "🔴 **Autorisation Twitch pour le compteur d'abonnés**\n"
+            + "Clique sur le lien ci-dessous pour autoriser le bot à lire ton nombre d'abonnés Twitch.\n"
+            + "Après autorisation, le compteur se mettra à jour automatiquement.\n\n"
+            + authUrl + "\n\n"
+            + "⚠️ **Important** : Après avoir cliqué, vérifie les logs Render. Tu devras copier les valeurs \n"
+            + "`TWITCH_USER_ACCESS_TOKEN` et `TWITCH_USER_REFRESH_TOKEN` dans les variables \n"
+            + "d'environnement de Render (Dashboard → Environment) pour qu'elles persistent après chaque redéploiement.",
 
           ephemeral:
             true
