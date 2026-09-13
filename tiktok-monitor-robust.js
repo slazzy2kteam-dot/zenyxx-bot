@@ -71,15 +71,27 @@ function saveKnownIds() {
 }
 
 // ======================================================
-// HEADERS
+// HEADERS — plusieurs User-Agent réalistes, tirés au sort
+// à chaque requête pour ressembler à un vrai navigateur.
 // ======================================================
 
-const HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  "Accept-Language": "en-US,en;q=0.9",
-};
+const USER_AGENTS = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+];
+
+function buildHeaders() {
+  return {
+    "User-Agent":
+      USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
+    Accept:
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9,fr;q=0.8",
+    Referer: "https://www.tiktok.com/",
+  };
+}
 
 // ======================================================
 // EXTRACTION — TikTok HTML (tous les IDs + followers)
@@ -125,80 +137,73 @@ function isValidPage(html) {
 }
 
 // ======================================================
-// SOURCES — ordre de priorité
+// SOURCES — ordre de priorité.
+// Direct en premier (gratuit, rapide, marche parfois), puis
+// plusieurs proxys de secours différents : si l'un est en
+// panne/rate-limited, les suivants prennent le relais.
 // ======================================================
 
 const TIKTOK_SOURCES = [
   {
     name: "embed-direct",
     buildUrl: (u) => `https://www.tiktok.com/embed/@${u}`,
-    extractVideos: extractAllVideosFromTikTokHtml,
-    extractFollowers: extractFollowersFromTikTokHtml,
     useProxy: false,
+  },
+  {
+    name: "embed-codetabs",
+    buildUrl: (u) => `https://www.tiktok.com/embed/@${u}`,
+    useProxy: true,
+    proxyUrl: (url) =>
+      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
   },
   {
     name: "embed-allorigins",
     buildUrl: (u) => `https://www.tiktok.com/embed/@${u}`,
-    extractVideos: extractAllVideosFromTikTokHtml,
-    extractFollowers: extractFollowersFromTikTokHtml,
     useProxy: true,
     proxyUrl: (url) =>
       `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
   },
+  {
+    name: "embed-corsproxy",
+    buildUrl: (u) => `https://www.tiktok.com/embed/@${u}`,
+    useProxy: true,
+    proxyUrl: (url) =>
+      `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+  },
 ];
 
 // ======================================================
-// FETCH — direct en priorité, proxy en secours
+// FETCH — direct en priorité, proxys en secours
 // ======================================================
 
-async function fetchHtml(url, useProxy, proxyUrlFn) {
-  // 1) Requête directe
-  if (!useProxy) {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 20000);
-      const res = await fetch(url, {
-        headers: HEADERS,
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
-      if (res.ok) {
-        const html = await res.text();
-        if (isValidPage(html)) {
-          return html;
-        }
-      }
-      console.log(
-        `[TikTok Monitor] Direct — HTTP ${res.status}`
-      );
-    } catch (e) {
-      console.log(`[TikTok Monitor] Direct échoué: ${e.message}`);
-    }
-    return null;
-  }
+async function fetchHtml(url, useProxy, proxyUrlFn, sourceName) {
+  const targetUrl = useProxy ? proxyUrlFn(url) : url;
+  const timeoutMs = useProxy ? 25000 : 20000;
 
-  // 2) Requête via proxy
   try {
-    const proxyUrl = proxyUrlFn(url);
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
-    const res = await fetch(proxyUrl, {
-      headers: HEADERS,
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const res = await fetch(targetUrl, {
+      headers: buildHeaders(),
       signal: controller.signal,
     });
     clearTimeout(timeout);
+
     if (res.ok) {
       const html = await res.text();
       if (isValidPage(html)) {
         return html;
       }
+      console.log(
+        `[TikTok Monitor] ${sourceName} — réponse invalide/trop courte (${html.length} chars)`
+      );
+      return null;
     }
-    console.log(
-      `[TikTok Monitor] Proxy — HTTP ${res.status}`
-    );
+
+    console.log(`[TikTok Monitor] ${sourceName} — HTTP ${res.status}`);
   } catch (e) {
-    console.log(`[TikTok Monitor] Proxy erreur: ${e.message}`);
-    }
+    console.log(`[TikTok Monitor] ${sourceName} — erreur: ${e.message}`);
+  }
   return null;
 }
 
@@ -246,7 +251,8 @@ async function _doFetchTikTokPage() {
     const html = await fetchHtml(
       url,
       source.useProxy,
-      source.proxyUrl
+      source.proxyUrl,
+      source.name
     );
     if (html) {
       console.log(
@@ -256,9 +262,7 @@ async function _doFetchTikTokPage() {
       cachedHtml = html;
       cachedHtmlTime = Date.now();
       // Extraire les followers aussi pendant qu'on a le HTML
-      if (source.extractFollowers) {
-        cachedFollowers = source.extractFollowers(html);
-      }
+      cachedFollowers = extractFollowersFromTikTokHtml(html);
       return html;
     }
   }
@@ -273,18 +277,11 @@ async function checkLatestVideos() {
   const html = await fetchTikTokPage();
   if (!html) return null;
 
-  for (const source of TIKTOK_SOURCES) {
-    if (source.extractVideos) {
-      const videoIds = source.extractVideos(html);
-      if (videoIds) {
-        console.log(
-          `[TikTok Monitor] ✅ ${videoIds.size} vidéo(s) trouvée(s)`
-        );
-        return videoIds;
-      }
-    }
+  const videoIds = extractAllVideosFromTikTokHtml(html);
+  if (videoIds) {
+    console.log(`[TikTok Monitor] ✅ ${videoIds.size} vidéo(s) trouvée(s)`);
   }
-  return null;
+  return videoIds;
 }
 
 async function checkFollowers() {
@@ -300,15 +297,7 @@ async function checkFollowers() {
   const html = await fetchTikTokPage();
   if (!html) return null;
 
-  for (const source of TIKTOK_SOURCES) {
-    if (source.extractFollowers) {
-      const count = source.extractFollowers(html);
-      if (count !== null) {
-        return count;
-      }
-    }
-  }
-  return null;
+  return extractFollowersFromTikTokHtml(html);
 }
 
 // ======================================================
