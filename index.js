@@ -468,18 +468,17 @@ let tiktokFetching = false; // Protection anti-empilement
 let twitchCounterFetching = false; // Protection anti-empilement Twitch
 
 async function getTwitchFollowerCount() {
-  let token;
-  try {
-    token = await getTwitchToken();
-  } catch (e) {
-    console.error("[Compteur Twitch] Impossible d'obtenir le token:", e.message);
+  const userToken = await getValidTwitchUserToken();
+  if (!userToken) {
+    console.error("[Compteur Twitch] Pas de token utilisateur — va sur /twitch-auth pour autoriser le bot");
     return null;
   }
 
   // Résoudre l'ID utilisateur Twitch si pas encore fait
   if (!twitchUserId) {
     try {
-      twitchUserId = await resolveTwitchUserId(token);
+      const appToken = await getTwitchToken();
+      twitchUserId = await resolveTwitchUserId(appToken);
       if (!twitchUserId) {
         console.error("[Compteur Twitch] Impossible de résoudre l'ID pour", TWITCH_USERNAME);
         return null;
@@ -494,11 +493,11 @@ async function getTwitchFollowerCount() {
   return new Promise((resolve) => {
     const options = {
       hostname: "api.twitch.tv",
-      path: "/helix/users/follows?to_id=" + encodeURIComponent(twitchUserId),
+      path: "/helix/channels/followers?broadcaster_id=" + encodeURIComponent(twitchUserId),
       method: "GET",
       headers: {
         "Client-Id": TWITCH_CLIENT_ID,
-        "Authorization": "Bearer " + token
+        "Authorization": "Bearer " + userToken
       }
     };
 
@@ -525,7 +524,6 @@ async function getTwitchFollowerCount() {
       console.error("[Compteur Twitch] Erreur requête:", e.message);
       resolve(null);
     });
-    req.end();
   });
 }
 
@@ -564,6 +562,153 @@ async function resolveTwitchUserId(token) {
       console.error("[Compteur Twitch] Erreur requête ID:", e.message);
       resolve(null);
     });
+    req.end();
+  });
+}
+
+// ======================================================
+// TWITCH OAUTH UTILISATEUR (nécessaire pour le nombre d'abonnés
+// depuis que Twitch a fermé l'ancien endpoint public)
+// ======================================================
+
+const TWITCH_TOKENS_FILE = "./twitch_user_tokens.json";
+const TWITCH_REDIRECT_URI = "https://zenyxx-bot.onrender.com/twitch-callback";
+
+function loadTwitchUserTokens() {
+  try {
+    if (!fs.existsSync(TWITCH_TOKENS_FILE)) return null;
+    return JSON.parse(fs.readFileSync(TWITCH_TOKENS_FILE, "utf8"));
+  } catch (e) {
+    console.error("Erreur lecture twitch_user_tokens.json :", e.message);
+    return null;
+  }
+}
+
+function saveTwitchUserTokens(tokens) {
+  try {
+    fs.writeFileSync(TWITCH_TOKENS_FILE, JSON.stringify(tokens, null, 2));
+  } catch (e) {
+    console.error("Erreur écriture twitch_user_tokens.json :", e.message);
+  }
+}
+
+// Visite cette URL une seule fois (connecté avec le compte zenyxxtw) pour autoriser le bot
+app.get("/twitch-auth", (req, res) => {
+  const scope = "moderator:read:followers";
+  const url = `https://id.twitch.tv/oauth2/authorize?client_id=${TWITCH_CLIENT_ID}&redirect_uri=${encodeURIComponent(TWITCH_REDIRECT_URI)}&response_type=code&scope=${encodeURIComponent(scope)}`;
+  res.redirect(url);
+});
+
+// Twitch redirige ici après autorisation
+app.get("/twitch-callback", async (req, res) => {
+  const code = req.query.code;
+  if (!code) return res.send("❌ Autorisation refusée ou code manquant.");
+
+  const postData = new URLSearchParams({
+    client_id: TWITCH_CLIENT_ID,
+    client_secret: TWITCH_CLIENT_SECRET,
+    code,
+    grant_type: "authorization_code",
+    redirect_uri: TWITCH_REDIRECT_URI
+  }).toString();
+
+  try {
+    const tokens = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: "id.twitch.tv",
+        path: "/oauth2/token",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Content-Length": Buffer.byteLength(postData)
+        }
+      };
+      const reqTok = httpsModule.request(options, r => {
+        let body = "";
+        r.on("data", c => body += c);
+        r.on("end", () => {
+          try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+        });
+      });
+      reqTok.on("error", reject);
+      reqTok.write(postData);
+      reqTok.end();
+    });
+
+    if (!tokens.access_token) {
+      console.error("[Twitch OAuth] Échec de l'échange du code :", tokens);
+      return res.send("❌ Échec de l'autorisation. Regarde les logs Render.");
+    }
+
+    saveTwitchUserTokens({
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      obtained_at: Date.now(),
+      expires_in: tokens.expires_in
+    });
+
+    console.log("✅ [Twitch OAuth] Autorisation réussie, tokens sauvegardés.");
+    res.send("✅ Autorisation Twitch réussie ! Tu peux fermer cette page.");
+  } catch (e) {
+    console.error("[Twitch OAuth] Erreur :", e.message);
+    res.send("❌ Erreur lors de l'autorisation. Regarde les logs Render.");
+  }
+});
+
+// Renvoie un token utilisateur valide, en le rafraîchissant si besoin
+async function getValidTwitchUserToken() {
+  const tokens = loadTwitchUserTokens();
+  if (!tokens) return null;
+
+  const isExpired = Date.now() > (tokens.obtained_at + (tokens.expires_in - 300) * 1000);
+  if (!isExpired) return tokens.access_token;
+
+  const postData = new URLSearchParams({
+    client_id: TWITCH_CLIENT_ID,
+    client_secret: TWITCH_CLIENT_SECRET,
+    grant_type: "refresh_token",
+    refresh_token: tokens.refresh_token
+  }).toString();
+
+  return new Promise((resolve) => {
+    const options = {
+      hostname: "id.twitch.tv",
+      path: "/oauth2/token",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(postData)
+      }
+    };
+    const req = httpsModule.request(options, res => {
+      let body = "";
+      res.on("data", c => body += c);
+      res.on("end", () => {
+        try {
+          const data = JSON.parse(body);
+          if (data.access_token) {
+            saveTwitchUserTokens({
+              access_token: data.access_token,
+              refresh_token: data.refresh_token || tokens.refresh_token,
+              obtained_at: Date.now(),
+              expires_in: data.expires_in
+            });
+            resolve(data.access_token);
+          } else {
+            console.error("[Twitch OAuth] Échec du rafraîchissement :", body);
+            resolve(null);
+          }
+        } catch (e) {
+          console.error("[Twitch OAuth] Erreur parsing refresh:", e.message);
+          resolve(null);
+        }
+      });
+    });
+    req.on("error", e => {
+      console.error("[Twitch OAuth] Erreur refresh:", e.message);
+      resolve(null);
+    });
+    req.write(postData);
     req.end();
   });
 }
