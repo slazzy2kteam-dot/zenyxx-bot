@@ -1,5 +1,7 @@
 const fetch = require("node-fetch");
 const { EmbedBuilder } = require("discord.js");
+const fs = require("fs");
+const path = require("path");
 
 // ======================================================
 // CONFIGURATION
@@ -11,16 +13,41 @@ const CONFIG = {
   webhookUrl: "https://discord.com/api/webhooks/1548544268371623996/syygwOcpQdd2GLszvp4JHEjB3_lRS60lMEMbRnMvhWdXBYHZ2hl9As0A4tAm0JuPg5XB",
   checkIntervalMs: 2 * 60 * 1000, // 2 minutes
   maxFailures: 10,
+  knownIdsFile: path.join(__dirname, "tiktok-known-ids.json"),
 };
 
 // ======================================================
 // ÉTAT
 // ======================================================
 
-let lastVideoId = null;
 let consecutiveFailures = 0;
 let intervalId = null;
 let client = null;
+
+// Set des IDs de vidéos déjà notifiées (survit aux redémarrages via fichier)
+let knownVideoIds = new Set();
+
+// Charger les IDs connus depuis le fichier
+function loadKnownIds() {
+  try {
+    if (fs.existsSync(CONFIG.knownIdsFile)) {
+      const data = JSON.parse(fs.readFileSync(CONFIG.knownIdsFile, "utf8"));
+      knownVideoIds = new Set(data);
+      console.log(`[TikTok Monitor] 📂 ${knownVideoIds.size} IDs déjà connus chargés`);
+    }
+  } catch (e) {
+    console.error(`[TikTok Monitor] Erreur chargement IDs: ${e.message}`);
+  }
+}
+
+// Sauvegarder les IDs connus dans le fichier
+function saveKnownIds() {
+  try {
+    fs.writeFileSync(CONFIG.knownIdsFile, JSON.stringify([...knownVideoIds]), "utf8");
+  } catch (e) {
+    console.error(`[TikTok Monitor] Erreur sauvegarde IDs: ${e.message}`);
+  }
+}
 
 // ======================================================
 // PROXIES + SOURCES
@@ -57,13 +84,13 @@ const TIKTOK_SOURCES = [
   {
     name: "embed",
     buildUrl: (u) => `https://www.tiktok.com/embed/@${u}`,
-    extractVideo: extractVideoFromTikTokHtml,
+    extractVideos: extractAllVideosFromTikTokHtml,
     extractFollowers: extractFollowersFromTikTokHtml,
   },
   {
     name: "profile",
     buildUrl: (u) => `https://www.tiktok.com/@${u}`,
-    extractVideo: extractVideoFromTikTokHtml,
+    extractVideos: extractAllVideosFromTikTokHtml,
     extractFollowers: extractFollowersFromTikTokHtml,
   },
   // urlebird = site tiers qui affiche les profils TikTok
@@ -71,31 +98,37 @@ const TIKTOK_SOURCES = [
   {
     name: "urlebird",
     buildUrl: (u) => `https://urlebird.com/user/${u}/`,
-    extractVideo: extractVideoFromUrlebird,
+    extractVideos: extractAllVideosFromUrlebird,
     extractFollowers: null, // pas fiable sur urlebird
   },
 ];
 
 // ======================================================
-// EXTRACTION — TikTok HTML
+// EXTRACTION — TikTok HTML (tous les IDs)
 // ======================================================
 
-function extractVideoFromTikTokHtml(html) {
+function extractAllVideosFromTikTokHtml(html) {
+  const ids = new Set();
+
   // Méthode 1 : video/7684717468039908631 dans les URLs
   const urlMatches = html.match(/video\/(\d{10,})/g);
-  if (urlMatches && urlMatches.length > 0) {
-    const id = urlMatches[0].match(/video\/(\d{10,})/);
-    if (id) return id[1];
+  if (urlMatches) {
+    for (const m of urlMatches) {
+      const id = m.match(/video\/(\d{10,})/);
+      if (id) ids.add(id[1]);
+    }
   }
 
   // Méthode 2 : "id":"7684717468039908631" dans le JSON
   const idMatches = html.match(/"id":"(\d{15,})"/g);
-  if (idMatches && idMatches.length > 0) {
-    const id = idMatches[0].match(/"id":"(\d{15,})"/);
-    if (id) return id[1];
+  if (idMatches) {
+    for (const m of idMatches) {
+      const id = m.match(/"id":"(\d{15,})"/);
+      if (id) ids.add(id[1]);
+    }
   }
 
-  return null;
+  return ids.size > 0 ? ids : null;
 }
 
 function extractFollowersFromTikTokHtml(html) {
@@ -104,18 +137,19 @@ function extractFollowersFromTikTokHtml(html) {
 }
 
 // ======================================================
-// EXTRACTION — Urlebird HTML
+// EXTRACTION — Urlebird HTML (tous les IDs)
 // ======================================================
 
-function extractVideoFromUrlebird(html) {
-  // Urlebird liste les vidéos avec des liens tiktok.com/@user/video/ID
+function extractAllVideosFromUrlebird(html) {
+  const ids = new Set();
   const matches = html.match(/video\/(\d{10,})/g);
-  if (matches && matches.length > 0) {
-    // Prendre le 1er = vidéo la plus récente
-    const id = matches[0].match(/video\/(\d{10,})/);
-    if (id) return id[1];
+  if (matches) {
+    for (const m of matches) {
+      const id = m.match(/video\/(\d{10,})/);
+      if (id) ids.add(id[1]);
+    }
   }
-  return null;
+  return ids.size > 0 ? ids : null;
 }
 
 // ======================================================
@@ -190,18 +224,18 @@ async function fetchViaProxy(targetUrl) {
 // VÉRIFICATION MULTI-SOURCE
 // ======================================================
 
-async function checkLatestVideo() {
+async function checkLatestVideos() {
   for (const source of TIKTOK_SOURCES) {
     const url = source.buildUrl(CONFIG.username);
     console.log(`[TikTok Monitor] 🔄 Source: ${source.name}`);
     const html = await fetchViaProxy(url);
     if (html) {
-      const videoId = source.extractVideo(html);
-      if (videoId) {
+      const videoIds = source.extractVideos(html);
+      if (videoIds) {
         console.log(
-          `[TikTok Monitor] ✅ Vidéo trouvée via ${source.name}: ${videoId}`
+          `[TikTok Monitor] ✅ ${videoIds.size} vidéo(s) trouvée(s) via ${source.name}`
         );
-        return videoId;
+        return videoIds;
       }
       // Page valide mais pas de vidéo trouvée — debug
       console.log(
@@ -212,8 +246,8 @@ async function checkLatestVideo() {
   return null;
 }
 
+// Garder pour compatibilité (checkFollowers utilisé par index.js)
 async function checkFollowers() {
-  // On utilise uniquement les sources TikTok (pas urlebird pour les followers)
   for (const source of TIKTOK_SOURCES) {
     if (!source.extractFollowers) continue;
     const url = source.buildUrl(CONFIG.username);
@@ -302,26 +336,41 @@ async function monitorLoop() {
   if (!client) return;
 
   try {
-    const videoId = await checkLatestVideo();
+    const videoIds = await checkLatestVideos();
 
-    if (videoId) {
+    if (videoIds) {
       consecutiveFailures = 0;
 
-      if (lastVideoId === null) {
-        lastVideoId = videoId;
-        console.log(
-          `[TikTok Monitor] Premier lancement — ID initial: ${videoId}`
-        );
-      } else if (videoId !== lastVideoId) {
-        console.log(
-          `[TikTok Monitor] 🎬 Nouvelle vidéo ! Ancien: ${lastVideoId} → Nouveau: ${videoId}`
-        );
-        lastVideoId = videoId;
-        // Envoyer la notification une seule fois (le salon cible est fixe dans CONFIG)
-        const guild = client.guilds.cache.values().next().value;
-        if (guild) await sendVideoNotification(guild, videoId);
-      } else {
+      // Trouver les NOUVEAUX IDs qu'on a jamais vus
+      const newIds = [];
+      for (const id of videoIds) {
+        if (!knownVideoIds.has(id)) {
+          newIds.push(id);
+        }
+      }
+
+      if (newIds.length === 0) {
         console.log("[TikTok Monitor] Pas de nouvelle vidéo");
+      } else if (knownVideoIds.size === 0) {
+        // Premier lancement : on enregistre tout sans notifier
+        for (const id of newIds) {
+          knownVideoIds.add(id);
+        }
+        saveKnownIds();
+        console.log(
+          `[TikTok Monitor] Premier lancement — ${newIds.length} IDs initiaux enregistrés (pas de notification)`
+        );
+      } else {
+        // Des vraies nouvelles vidéos !
+        for (const id of newIds) {
+          console.log(
+            `[TikTok Monitor] 🎬 Nouvelle vidéo détectée ! ID: ${id}`
+          );
+          knownVideoIds.add(id);
+          const guild = client.guilds.cache.values().next().value;
+          if (guild) await sendVideoNotification(guild, id);
+        }
+        saveKnownIds();
       }
     } else {
       consecutiveFailures++;
@@ -355,6 +404,7 @@ async function monitorLoop() {
 
 function startTikTokMonitor(discordClient) {
   client = discordClient;
+  loadKnownIds();
   monitorLoop();
   intervalId = setInterval(monitorLoop, CONFIG.checkIntervalMs);
   console.log(
