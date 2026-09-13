@@ -123,6 +123,7 @@ let twitchAccessToken = null;
 let twitchTokenExpiry = 0;
 let twitchWasLive = false;
 let twitchLiveMessageId = null;
+let twitchUserId = null; // Résolu dynamiquement à partir du username
 
 // Obtenir un token d'accès Twitch
 async function getTwitchToken() {
@@ -399,7 +400,7 @@ function startTwitchLiveCheck() {
 
 const COUNTER_CHANNELS = {
   "1547260234077311046": { type: "members", label: "👥 Membres" },
-  "1547260576680509450": { type: "twitch", label: "👥 Abonnés Twitch", username: null },
+  "1547260576680509450": { type: "twitch", label: "👥 Abonnés Twitch", username: "zenyxxtw" },
   "1547260849830367334": { type: "tiktok", label: "👥 Abonnés Tiktok", username: "aetherofficiel" }
 };
 
@@ -464,6 +465,131 @@ async function updateMemberCounters(guild) {
 }
 
 let tiktokFetching = false; // Protection anti-empilement
+let twitchCounterFetching = false; // Protection anti-empilement Twitch
+
+async function getTwitchFollowerCount() {
+  let token;
+  try {
+    token = await getTwitchToken();
+  } catch (e) {
+    console.error("[Compteur Twitch] Impossible d'obtenir le token:", e.message);
+    return null;
+  }
+
+  // Résoudre l'ID utilisateur Twitch si pas encore fait
+  if (!twitchUserId) {
+    try {
+      twitchUserId = await resolveTwitchUserId(token);
+      if (!twitchUserId) {
+        console.error("[Compteur Twitch] Impossible de résoudre l'ID pour", TWITCH_USERNAME);
+        return null;
+      }
+      console.log("[Compteur Twitch] ID résolu pour", TWITCH_USERNAME, ":", twitchUserId);
+    } catch (e) {
+      console.error("[Compteur Twitch] Erreur résolution ID:", e.message);
+      return null;
+    }
+  }
+
+  return new Promise((resolve) => {
+    const options = {
+      hostname: "api.twitch.tv",
+      path: "/helix/users/follows?to_id=" + encodeURIComponent(twitchUserId),
+      method: "GET",
+      headers: {
+        "Client-Id": TWITCH_CLIENT_ID,
+        "Authorization": "Bearer " + token
+      }
+    };
+
+    const req = httpsModule.get(options, (res) => {
+      let body = "";
+      res.on("data", (chunk) => (body += chunk));
+      res.on("end", () => {
+        try {
+          const data = JSON.parse(body);
+          if (data.total !== undefined) {
+            resolve(data.total);
+          } else {
+            console.error("[Compteur Twitch] Réponse inattendue:", body);
+            resolve(null);
+          }
+        } catch (e) {
+          console.error("[Compteur Twitch] Erreur parse:", e.message);
+          resolve(null);
+        }
+      });
+    });
+
+    req.on("error", (e) => {
+      console.error("[Compteur Twitch] Erreur requête:", e.message);
+      resolve(null);
+    });
+    req.end();
+  });
+}
+
+async function resolveTwitchUserId(token) {
+  return new Promise((resolve) => {
+    const options = {
+      hostname: "api.twitch.tv",
+      path: "/helix/users?login=" + encodeURIComponent(TWITCH_USERNAME),
+      method: "GET",
+      headers: {
+        "Client-Id": TWITCH_CLIENT_ID,
+        "Authorization": "Bearer " + token
+      }
+    };
+
+    const req = httpsModule.get(options, (res) => {
+      let body = "";
+      res.on("data", (chunk) => (body += chunk));
+      res.on("end", () => {
+        try {
+          const data = JSON.parse(body);
+          if (data.data && data.data.length > 0 && data.data[0].id) {
+            resolve(data.data[0].id);
+          } else {
+            console.error("[Compteur Twitch] ID non trouvé dans la réponse:", body);
+            resolve(null);
+          }
+        } catch (e) {
+          console.error("[Compteur Twitch] Erreur parse ID:", e.message);
+          resolve(null);
+        }
+      });
+    });
+
+    req.on("error", (e) => {
+      console.error("[Compteur Twitch] Erreur requête ID:", e.message);
+      resolve(null);
+    });
+    req.end();
+  });
+}
+
+async function updateTwitchCounter(guild) {
+  if (twitchCounterFetching) return;
+  twitchCounterFetching = true;
+  const twitchChannel = guild.channels.cache.get("1547260576680509450");
+  if (!twitchChannel) {
+    twitchCounterFetching = false;
+    return;
+  }
+
+  try {
+    const followers = await getTwitchFollowerCount();
+    if (followers !== null) {
+      enqueueCounterUpdate("1547260576680509450", `👥 Abonnés Twitch : ${followers}`);
+    } else {
+      console.error("[Compteur Twitch] followerCount non trouvé");
+    }
+  } catch (error) {
+    console.error("[Compteur Twitch] Erreur:", error.message);
+  } finally {
+    twitchCounterFetching = false;
+  }
+}
 
 async function updateTikTokCounter(guild) {
   if (tiktokFetching) return; // Une requête est déjà en cours, on attend
@@ -510,6 +636,15 @@ function startCounterInterval() {
   }
   tickTikTok();
   setInterval(tickTikTok, TIKTOK_INTERVAL_MS);
+
+  // Twitch : même interval que le live check (2 min)
+  function tickTwitch() {
+    for (const guild of client.guilds.cache.values()) {
+      updateTwitchCounter(guild);
+    }
+  }
+  tickTwitch();
+  setInterval(tickTwitch, TIKTOK_INTERVAL_MS);
 }
 
 // ======================================================
