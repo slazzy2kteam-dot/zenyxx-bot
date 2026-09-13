@@ -241,7 +241,7 @@ async function sendTwitchLiveNotification(guild, stream) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           username: "𝒁𝒆𝒏𝒚𝑿𝒙 Twitch",
-          avatar_url: "https://storage.googleapis.com/ot-pt/present_files/2026-09-13/anonymous/default/a4e6286be56b42539c518737910a648b_.png?Expires=1791870770&GoogleAccessId=gcs-owner%40oreateai-434511.iam.gserviceaccount.com&Signature=VAO%2B4lc1y5KgYSvT5kBpZs0kFRBZUhNcIIgvil5kSyL7W0s%2BrlKeCVvUFMMTpE3t9se08SYXUrKppSZtuolVxetifpne94W3OPRZxKCjxeti8xK2QmYtfa8WhCY16oNNFrKiOC8KgJ1MWMDdKFWnn4%2Bd%2BhydkNp%2Ff79icgnhadr7Eb6l21FYPyaj173zeGIRPeji4xVAkeRLpUVxUdSwOhbehHS6%2BySrVC53PBbNBAhpIRKy234pbmuGbpQ4wrXn1VZw9EM%2F50GheVSrRBSu4luEtFWEACMdsyEZDTYik0A7ij4tWD%2FvKA7B4ucohilvqvtFUnNUkDsn4VmVi25pIA%3D%3D",
+          avatar_url: "<<url_9:png>>",
           content: `@everyone 🔴 **ZenyXx vient de lancer son live !** Viens le regarder !\n${twitchUrl}`,
           embeds: [embed],
         }),
@@ -313,7 +313,7 @@ async function twitchLiveLoop() {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 username: "𝒁𝒆𝒏𝒚𝑿𝒙 Twitch",
-                avatar_url: "https://storage.googleapis.com/ot-pt/present_files/2026-09-13/anonymous/default/a4e6286be56b42539c518737910a648b_.png?Expires=1791870770&GoogleAccessId=gcs-owner%40oreateai-434511.iam.gserviceaccount.com&Signature=VAO%2B4lc1y5KgYSvT5kBpZs0kFRBZUhNcIIgvil5kSyL7W0s%2BrlKeCVvUFMMTpE3t9se08SYXUrKppSZtuolVxetifpne94W3OPRZxKCjxeti8xK2QmYtfa8WhCY16oNNFrKiOC8KgJ1MWMDdKFWnn4%2Bd%2BhydkNp%2Ff79icgnhadr7Eb6l21FYPyaj173zeGIRPeji4xVAkeRLpUVxUdSwOhbehHS6%2BySrVC53PBbNBAhpIRKy234pbmuGbpQ4wrXn1VZw9EM%2F50GheVSrRBSu4luEtFWEACMdsyEZDTYik0A7ij4tWD%2FvKA7B4ucohilvqvtFUnNUkDsn4VmVi25pIA%3D%3D",
+                avatar_url: "<<url_9:png>>",
                 content: "⚫ **Le live de ZenyXx est terminé.** Merci d'avoir regardé !",
               }),
             });
@@ -502,7 +502,7 @@ function startCounterInterval() {
   }
   setInterval(tickMembers, MEMBER_INTERVAL_MS);
 
-  // TikTok : toutes les 30 secondes
+  // TikTok : même interval que le moniteur vidéo (2 min), partage le cache HTML
   function tickTikTok() {
     for (const guild of client.guilds.cache.values()) {
       updateTikTokCounter(guild);
