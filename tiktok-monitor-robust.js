@@ -9,7 +9,7 @@ const CONFIG = {
   username: "aetherofficiel",
   channelId: "1548231185015120054", // 📺・tiktok
   checkIntervalMs: 2 * 60 * 1000, // 2 minutes
-  maxFailures: 10, // alerte Discord après 10 échecs consécutifs
+  maxFailures: 10,
 };
 
 // ======================================================
@@ -22,14 +22,7 @@ let intervalId = null;
 let client = null;
 
 // ======================================================
-// PROXY GRATUITS — Pas de compte, pas de carte bancaire
-// ======================================================
-//
-// TikTok bloque les requêtes depuis les datacenters (Render, Railway…)
-// On passe par des services de proxy CORS gratuits qui relaisent
-// la requête depuis leurs propres serveurs.
-//
-// Si un proxy est down ou bloqué, on essaie le suivant.
+// PROXIES + SOURCES
 // ======================================================
 
 const PROXIES = [
@@ -58,12 +51,88 @@ const HEADERS = {
   "Accept-Language": "en-US,en;q=0.9",
 };
 
+// Sources TikTok — on essaie dans l'ordre
+const TIKTOK_SOURCES = [
+  {
+    name: "embed",
+    buildUrl: (u) => `https://www.tiktok.com/embed/@${u}`,
+    extractVideo: extractVideoFromTikTokHtml,
+    extractFollowers: extractFollowersFromTikTokHtml,
+  },
+  {
+    name: "profile",
+    buildUrl: (u) => `https://www.tiktok.com/@${u}`,
+    extractVideo: extractVideoFromTikTokHtml,
+    extractFollowers: extractFollowersFromTikTokHtml,
+  },
+  // urlebird = site tiers qui affiche les profils TikTok
+  // souvent pas bloqué depuis les datacenters
+  {
+    name: "urlebird",
+    buildUrl: (u) => `https://urlebird.com/user/${u}/`,
+    extractVideo: extractVideoFromUrlebird,
+    extractFollowers: null, // pas fiable sur urlebird
+  },
+];
+
 // ======================================================
-// FETCH VIA PROXY
+// EXTRACTION — TikTok HTML
 // ======================================================
 
+function extractVideoFromTikTokHtml(html) {
+  // Méthode 1 : video/7684717468039908631 dans les URLs
+  const urlMatches = html.match(/video\/(\d{10,})/g);
+  if (urlMatches && urlMatches.length > 0) {
+    const id = urlMatches[0].match(/video\/(\d{10,})/);
+    if (id) return id[1];
+  }
+
+  // Méthode 2 : "id":"7684717468039908631" dans le JSON
+  const idMatches = html.match(/"id":"(\d{15,})"/g);
+  if (idMatches && idMatches.length > 0) {
+    const id = idMatches[0].match(/"id":"(\d{15,})"/);
+    if (id) return id[1];
+  }
+
+  return null;
+}
+
+function extractFollowersFromTikTokHtml(html) {
+  const match = html.match(/"followerCount":(\d+)/);
+  return match ? parseInt(match[1], 10) : null;
+}
+
+// ======================================================
+// EXTRACTION — Urlebird HTML
+// ======================================================
+
+function extractVideoFromUrlebird(html) {
+  // Urlebird liste les vidéos avec des liens tiktok.com/@user/video/ID
+  const matches = html.match(/video\/(\d{10,})/g);
+  if (matches && matches.length > 0) {
+    // Prendre le 1er = vidéo la plus récente
+    const id = matches[0].match(/video\/(\d{10,})/);
+    if (id) return id[1];
+  }
+  return null;
+}
+
+// ======================================================
+// FETCH VIA PROXY — avec validation intelligente
+// ======================================================
+
+function isValidPage(html) {
+  if (!html || html.length < 500) return false;
+  // Les pages CAPTCHA font généralement < 20KB
+  // Si la page fait > 50KB, c'est presque certainement du vrai contenu
+  if (html.length > 50000) return true;
+  // Pour les pages plus petites, vérifier les signes de CAPTCHA
+  if (html.includes("Just a moment") && html.length < 10000) return false;
+  if (html.includes("cf-challenge") && html.length < 10000) return false;
+  return true;
+}
+
 async function fetchViaProxy(targetUrl) {
-  // Essayer chaque proxy dans l'ordre
   for (const proxy of PROXIES) {
     try {
       const proxyUrl = proxy.buildUrl(targetUrl);
@@ -78,91 +147,87 @@ async function fetchViaProxy(targetUrl) {
 
       if (res.ok) {
         const html = await res.text();
-        // Vérifier que la réponse est valide (pas une page CAPTCHA)
-        if (
-          html &&
-          html.length > 500 &&
-          !html.includes("Just a moment") &&
-          !html.includes("captcha") &&
-          !html.includes("cf-challenge")
-        ) {
-          console.log(`[TikTok Monitor] ✅ Proxy ${proxy.name} — OK`);
+        if (isValidPage(html)) {
+          console.log(
+            `[TikTok Monitor] ✅ Proxy ${proxy.name} — ${html.length} chars`
+          );
           return html;
         }
         console.log(
-          `[TikTok Monitor] Proxy ${proxy.name} — réponse invalide (${html.length} chars, possible CAPTCHA)`
+          `[TikTok Monitor] Proxy ${proxy.name} — page invalide (${html.length} chars)`
         );
       } else {
-        console.log(
-          `[TikTok Monitor] Proxy ${proxy.name} — HTTP ${res.status}`
-        );
+        console.log(`[TikTok Monitor] Proxy ${proxy.name} — HTTP ${res.status}`);
       }
     } catch (e) {
       console.log(`[TikTok Monitor] Proxy ${proxy.name} — erreur: ${e.message}`);
     }
   }
 
-  // Dernier recours : requête directe (fonctionne en local, pas depuis Render)
+  // Dernier recours : requête directe
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
-
-    const res = await fetch(targetUrl, {
-      headers: HEADERS,
-      signal: controller.signal,
-    });
+    const res = await fetch(targetUrl, { headers: HEADERS, signal: controller.signal });
     clearTimeout(timeout);
-
     if (res.ok) {
       const html = await res.text();
-      if (html && html.length > 500) {
-        console.log("[TikTok Monitor] ✅ Requête directe OK");
+      if (isValidPage(html)) {
+        console.log(`[TikTok Monitor] ✅ Direct — ${html.length} chars`);
         return html;
       }
     }
-    console.log(
-      `[TikTok Monitor] Requête directe — HTTP ${res.status}`
-    );
+    console.log(`[TikTok Monitor] Direct — HTTP ${res.status}`);
   } catch (e) {
-    console.log(`[TikTok Monitor] Requête directe échouée: ${e.message}`);
+    console.log(`[TikTok Monitor] Direct échoué: ${e.message}`);
   }
 
   return null;
 }
 
 // ======================================================
-// EXTRACTION DES DONNÉES
-// ======================================================
-
-function extractLatestVideoId(html) {
-  // Chercher les IDs dans les URLs : video/7684717468039908631
-  const matches = html.match(/video\/(\d{10,})/g);
-  if (matches && matches.length > 0) {
-    const idMatch = matches[0].match(/video\/(\d{10,})/);
-    return idMatch ? idMatch[1] : null;
-  }
-  return null;
-}
-
-function extractFollowerCount(html) {
-  const match = html.match(/"followerCount":(\d+)/);
-  return match ? parseInt(match[1], 10) : null;
-}
-
-// ======================================================
-// VÉRIFICATION VIDÉO + FOLLOWERS
+// VÉRIFICATION MULTI-SOURCE
 // ======================================================
 
 async function checkLatestVideo() {
-  const embedUrl = `https://www.tiktok.com/embed/@${CONFIG.username}`;
-  const html = await fetchViaProxy(embedUrl);
-  return html ? extractLatestVideoId(html) : null;
+  for (const source of TIKTOK_SOURCES) {
+    const url = source.buildUrl(CONFIG.username);
+    console.log(`[TikTok Monitor] 🔄 Source: ${source.name}`);
+    const html = await fetchViaProxy(url);
+    if (html) {
+      const videoId = source.extractVideo(html);
+      if (videoId) {
+        console.log(
+          `[TikTok Monitor] ✅ Vidéo trouvée via ${source.name}: ${videoId}`
+        );
+        return videoId;
+      }
+      // Page valide mais pas de vidéo trouvée — debug
+      console.log(
+        `[TikTok Monitor] Source ${source.name} — page OK mais pas d'ID vidéo`
+      );
+    }
+  }
+  return null;
 }
 
 async function checkFollowers() {
-  const profileUrl = `https://www.tiktok.com/@${CONFIG.username}`;
-  const html = await fetchViaProxy(profileUrl);
-  return html ? extractFollowerCount(html) : null;
+  // On utilise uniquement les sources TikTok (pas urlebird pour les followers)
+  for (const source of TIKTOK_SOURCES) {
+    if (!source.extractFollowers) continue;
+    const url = source.buildUrl(CONFIG.username);
+    const html = await fetchViaProxy(url);
+    if (html) {
+      const count = source.extractFollowers(html);
+      if (count !== null) {
+        console.log(
+          `[TikTok Monitor] ✅ Followers via ${source.name}: ${count}`
+        );
+        return count;
+      }
+    }
+  }
+  return null;
 }
 
 // ======================================================
@@ -172,9 +237,7 @@ async function checkFollowers() {
 async function sendVideoNotification(guild, videoId) {
   const channel = guild.channels.cache.get(CONFIG.channelId);
   if (!channel) {
-    console.error(
-      `[TikTok Monitor] Salon introuvable — ID: ${CONFIG.channelId}`
-    );
+    console.error(`[TikTok Monitor] Salon introuvable — ID: ${CONFIG.channelId}`);
     return;
   }
 
@@ -195,9 +258,7 @@ async function sendVideoNotification(guild, videoId) {
       content: `@everyone **Nouvelle vidéo TikTok !** @${CONFIG.username} vient de poster !\n${videoUrl}`,
       embeds: [embed],
     });
-    console.log(
-      `[TikTok Monitor] 📢 Notification envoyée ! Vidéo: ${videoId}`
-    );
+    console.log(`[TikTok Monitor] 📢 Notification envoyée ! Vidéo: ${videoId}`);
   } catch (err) {
     console.error(`[TikTok Monitor] Erreur envoi: ${err.message}`);
   }
@@ -212,22 +273,19 @@ async function monitorLoop() {
 
   for (const guild of client.guilds.cache.values()) {
     try {
-      // --- Vérification nouvelle vidéo ---
       const videoId = await checkLatestVideo();
 
       if (videoId) {
         consecutiveFailures = 0;
 
         if (lastVideoId === null) {
-          // Premier lancement : stocker l'ID sans notifier
           lastVideoId = videoId;
           console.log(
             `[TikTok Monitor] Premier lancement — ID initial: ${videoId}`
           );
         } else if (videoId !== lastVideoId) {
-          // Nouvelle vidéo détectée !
           console.log(
-            `[TikTok Monitor] 🎬 Nouvelle vidéo détectée ! ID: ${videoId}`
+            `[TikTok Monitor] 🎬 Nouvelle vidéo ! Ancien: ${lastVideoId} → Nouveau: ${videoId}`
           );
           lastVideoId = videoId;
           await sendVideoNotification(guild, videoId);
@@ -249,7 +307,7 @@ async function monitorLoop() {
               )
               .catch(() => {});
           }
-          consecutiveFailures = 0; // Reset pour éviter le spam
+          consecutiveFailures = 0;
         }
       }
     } catch (e) {
@@ -269,12 +327,8 @@ function startTikTokMonitor(discordClient) {
   console.log(
     `[TikTok Monitor] Démarré — vérification toutes les ${
       CONFIG.checkIntervalMs / 1000
-    }s via proxy gratuit`
+    }s via proxy + urlebird`
   );
 }
-
-// ======================================================
-// EXPORTS
-// ======================================================
 
 module.exports = { startTikTokMonitor, checkFollowers };
