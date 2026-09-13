@@ -71,8 +71,12 @@ function saveKnownIds() {
 }
 
 // ======================================================
-// HEADERS — plusieurs User-Agent réalistes, tirés au sort
-// à chaque requête pour ressembler à un vrai navigateur.
+// HEADERS — User-Agent réalistes + cookies factices
+// pour ressembler à un vrai navigateur.
+//
+// 🔧 FIX : Ajout de cookies factices et d'en-têtes
+// supplémentaires pour contourner le blocage bot
+// de TikTok/Cloudflare.
 // ======================================================
 
 const USER_AGENTS = [
@@ -83,23 +87,174 @@ const USER_AGENTS = [
 ];
 
 function buildHeaders() {
+  const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+  // 🔧 FIX : Cookies factices pour que TikTok croit à un vrai navigateur
+  const dummyCookies = [
+    "tt_webid_v2=71" + Math.random().toString(36).slice(2, 12),
+    "tt_webid=71" + Math.random().toString(36).slice(2, 12),
+    "sid=t=xxx" + Math.random().toString(36).slice(2, 10),
+    "odin_tt=xxx",
+    "bm_sz=xxx",
+    "domain_ver=xxx",
+  ].join("; ");
+
   return {
-    "User-Agent":
-      USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
+    "User-Agent": ua,
     Accept:
-      "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9,fr;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
     Referer: "https://www.tiktok.com/",
+    Cookie: dummyCookies,
+    "Sec-Ch-Ua": '"Chromium”;v="131”, "Not_A Brand”;v="24"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
   };
 }
 
 // ======================================================
 // EXTRACTION — TikTok HTML (tous les IDs + followers)
+//
+// 🔧 FIX MAJEUR : Extraction depuis le JSON embarqué
+// __UNIVERSAL_DATA_FOR_REHYDRATION__ et RENDER_DATA
+// au lieu de se baser uniquement sur des regex fragiles.
+// Le JSON structuré contient la liste complète des
+// vidéos et le compteur de followers.
 // ======================================================
 
 function extractAllVideosFromTikTokHtml(html) {
   const ids = new Set();
 
+  // ─── Méthode 1 : __UNIVERSAL_DATA_FOR_REHYDRATION__ ───
+  // C'est la source de données la plus fiable sur la page profil.
+  const universalMatch = html.match(
+    /<script\s+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>\s*([\s\S]*?)\s*<\/script>/
+  );
+  if (universalMatch) {
+    try {
+      const data = JSON.parse(universalMatch[1]);
+      // Parcourir les scopes à la recherche des vidéos
+      for (const scopeKey of Object.keys(data)) {
+        const scope = data[scopeKey];
+        if (!scope || typeof scope !== "object") continue;
+        for (const moduleKey of Object.keys(scope)) {
+          const module = scope[moduleKey];
+          if (!module || typeof module !== "object") continue;
+
+          // itemList contient les vidéos du profil
+          if (Array.isArray(module.itemList)) {
+            for (const item of module.itemList) {
+              if (item.id) ids.add(String(item.id));
+            }
+          }
+
+          // Certaines structures imbriquées
+          if (module.itemList && Array.isArray(module.itemList)) {
+            for (const item of module.itemList) {
+              if (item.id) ids.add(String(item.id));
+            }
+          }
+
+          // Vérifier les sous-objets aussi
+          if (module.userInfo && module.userInfo.itemList) {
+            for (const item of module.userInfo.itemList) {
+              if (item.id) ids.add(String(item.id));
+            }
+          }
+        }
+      }
+      if (ids.size > 0) {
+        console.log(
+          `[TikTok Monitor] 📋 ${ids.size} ID(s) extrait(s) depuis __UNIVERSAL_DATA__`
+        );
+      }
+    } catch (e) {
+      console.log(
+        `[TikTok Monitor] ⚠️ Parse __UNIVERSAL_DATA__ échoué: ${e.message}`
+      );
+    }
+  }
+
+  // ─── Méthode 2 : RENDER_DATA (base64 encodé) ───
+  const renderMatch = html.match(
+    /<script\s+id="RENDER_DATA"\s+type="application\/json">([^<]+)<\/script>/
+  );
+  if (renderMatch) {
+    try {
+      const decoded = JSON.parse(decodeURIComponent(renderMatch[1]));
+      for (const key of Object.keys(decoded)) {
+        const section = decoded[key];
+        if (!section || typeof section !== "object") continue;
+
+        // Chercher les vidéos dans la structure
+        if (section.ItemModule) {
+          for (const itemKey of Object.keys(section.ItemModule)) {
+            const item = section.ItemModule[itemKey];
+            if (item.id) ids.add(String(item.id));
+          }
+        }
+        if (section.ItemList) {
+          for (const item of section.ItemList) {
+            if (item.id) ids.add(String(item.id));
+          }
+        }
+        // Parcours générique
+        if (section.aweme_list) {
+          for (const item of section.aweme_list) {
+            if (item.aweme_id) ids.add(String(item.aweme_id));
+            else if (item.id) ids.add(String(item.id));
+          }
+        }
+      }
+      if (ids.size > 0) {
+        console.log(
+          `[TikTok Monitor] 📋 ${ids.size} ID(s) extrait(s) depuis RENDER_DATA`
+        );
+      }
+    } catch (e) {
+      console.log(
+        `[TikTok Monitor] ⚠️ Parse RENDER_DATA échoué: ${e.message}`
+      );
+    }
+  }
+
+  // ─── Méthode 3 : SIGI_STATE ───
+  const sigiMatch = html.match(
+    /<script[^>]*>window\['SIGI_STATE'\]\s*=\s*JSON\.parse\('([\s\S]*?)'\);?<\/script>/
+  );
+  if (sigiMatch) {
+    try {
+      const data = JSON.parse(sigiMatch[1]);
+      // ItemModule contient les vidéos
+      if (data.ItemModule) {
+        for (const itemKey of Object.keys(data.ItemModule)) {
+          const item = data.ItemModule[itemKey];
+          if (item.id) ids.add(String(item.id));
+        }
+      }
+      if (data.ItemList) {
+        for (const item of data.ItemList) {
+          if (item.id) ids.add(String(item.id));
+        }
+      }
+      if (ids.size > 0) {
+        console.log(
+          `[TikTok Monitor] 📋 ${ids.size} ID(s) extrait(s) depuis SIGI_STATE`
+        );
+      }
+    } catch (e) {
+      console.log(
+        `[TikTok Monitor] ⚠️ Parse SIGI_STATE échoué: ${e.message}`
+      );
+    }
+  }
+
+  // ─── Méthode 4 : Regex de secours (ancienne méthode) ───
   const urlMatches = html.match(/video\/(\d{10,})/g);
   if (urlMatches) {
     for (const m of urlMatches) {
@@ -120,30 +275,162 @@ function extractAllVideosFromTikTokHtml(html) {
 }
 
 function extractFollowersFromTikTokHtml(html) {
+  // ─── Méthode 1 : __UNIVERSAL_DATA_FOR_REHYDRATION__ ───
+  const universalMatch = html.match(
+    /<script\s+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>\s*([\s\S]*?)\s*<\/script>/
+  );
+  if (universalMatch) {
+    try {
+      const data = JSON.parse(universalMatch[1]);
+      for (const scopeKey of Object.keys(data)) {
+        const scope = data[scopeKey];
+        if (!scope || typeof scope !== "object") continue;
+        for (const moduleKey of Object.keys(scope)) {
+          const module = scope[moduleKey];
+          if (!module || typeof module !== "object") continue;
+
+          // followerCount est souvent dans userInfo.stats
+          if (module.userInfo && module.userInfo.stats) {
+            const fc = module.userInfo.stats.followerCount;
+            if (typeof fc === "number") return fc;
+          }
+          // Autre structure possible
+          if (module.stats && typeof module.stats.followerCount === "number") {
+            return module.stats.followerCount;
+          }
+        }
+      }
+    } catch (e) {
+      // On continue avec les autres méthodes
+    }
+  }
+
+  // ─── Méthode 2 : RENDER_DATA ───
+  const renderMatch = html.match(
+    /<script\s+id="RENDER_DATA"\s+type="application\/json">([^<]+)<\/script>/
+  );
+  if (renderMatch) {
+    try {
+      const decoded = JSON.parse(decodeURIComponent(renderMatch[1]));
+      for (const key of Object.keys(decoded)) {
+        const section = decoded[key];
+        if (!section || typeof section !== "object") continue;
+        if (section.UserModule && section.UserModule.stats) {
+          const fc = section.UserModule.stats.followerCount;
+          if (typeof fc === "number") return fc;
+        }
+      }
+    } catch (e) {
+      // continuer
+    }
+  }
+
+  // ─── Méthode 3 : Regex (ancienne méthode, fallback) ───
   const match = html.match(/"followerCount":(\d+)/);
   return match ? parseInt(match[1], 10) : null;
 }
 
 // ======================================================
 // VALIDATION DE PAGE
+//
+// 🔧 FIX : Validation plus stricte — détection des
+// pages Cloudflare/CAPTCHA même quand elles sont longues.
 // ======================================================
 
 function isValidPage(html) {
   if (!html || html.length < 500) return false;
-  if (html.length > 50000) return true;
-  if (html.includes("Just a moment") && html.length < 10000) return false;
-  if (html.includes("cf-challenge") && html.length < 10000) return false;
+
+  // Signes de page de challenge Cloudflare / CAPTCHA
+  const challengeSigns = [
+    "Just a moment",
+    "cf-challenge",
+    "Enable JavaScript",
+    "Checking your browser",
+    "Please Wait",
+    "Attention Required",
+    "ray ID",
+    "_cfduid",
+    "challenge-platform",
+    "cf-browser-verification",
+  ];
+
+  // Si la page contient des signes de challenge ET est courte,
+  // c'est certainement un blocage
+  const hasChallenge = challengeSigns.some((s) =>
+    html.toLowerCase().includes(s.toLowerCase())
+  );
+  if (hasChallenge && html.length < 80000) return false;
+
+  // La page doit contenir du contenu TikTok
+  const hasTikTokContent =
+    html.includes("tiktok.com") ||
+    html.includes("TikTok") ||
+    html.includes("tiktok") ||
+    html.includes("__UNIVERSAL_DATA") ||
+    html.includes("RENDER_DATA") ||
+    html.includes("SIGI_STATE");
+
+  if (!hasTikTokContent) return false;
+
   return true;
 }
 
 // ======================================================
 // SOURCES — ordre de priorité.
-// Direct en premier (gratuit, rapide, marche parfois), puis
-// plusieurs proxys de secours différents : si l'un est en
-// panne/rate-limited, les suivants prennent le relais.
+//
+// 🔧 FIX MAJEUR :
+// 1. La page profil (@username) est utilisée en priorité
+//    au lieu de /embed/@username qui ne contient PAS
+//    la liste complète des vidéos.
+// 2. La version mobile (m.tiktok.com) est ajoutée car
+//    elle est souvent moins protégée par Cloudflare.
+// 3. L'embed reste en dernier recours.
+// 4. Plus de proxys de secours.
 // ======================================================
 
 const TIKTOK_SOURCES = [
+  // ─── Priorité 1 : Page profil directe ───
+  {
+    name: "profile-direct",
+    buildUrl: (u) => `https://www.tiktok.com/@${u}`,
+    useProxy: false,
+  },
+  // ─── Priorité 2 : Page profil via proxy ───
+  {
+    name: "profile-codetabs",
+    buildUrl: (u) => `https://www.tiktok.com/@${u}`,
+    useProxy: true,
+    proxyUrl: (url) =>
+      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+  },
+  {
+    name: "profile-allorigins",
+    buildUrl: (u) => `https://www.tiktok.com/@${u}`,
+    useProxy: true,
+    proxyUrl: (url) =>
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  },
+  {
+    name: "profile-corsproxy",
+    buildUrl: (u) => `https://www.tiktok.com/@${u}`,
+    useProxy: true,
+    proxyUrl: (url) =>
+      `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  },
+  // ─── Priorité 3 : Page profil MOBILE (moins de protection) ───
+  {
+    name: "mobile-direct",
+    buildUrl: (u) => `https://m.tiktok.com/@${u}`,
+    useProxy: false,
+  },
+  {
+    name: "mobile-codetabs",
+    buildUrl: (u) => `https://m.tiktok.com/@${u}`,
+    useProxy: true,
+    proxyUrl: (url) =>
+      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+  },
+  // ─── Priorité 4 : Embed (dernier recours) ───
   {
     name: "embed-direct",
     buildUrl: (u) => `https://www.tiktok.com/embed/@${u}`,
@@ -168,7 +455,7 @@ const TIKTOK_SOURCES = [
     buildUrl: (u) => `https://www.tiktok.com/embed/@${u}`,
     useProxy: true,
     proxyUrl: (url) =>
-      `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+      `https://corsproxy.io/?${encodeURIComponent(url)}`,
   },
 ];
 
@@ -178,7 +465,7 @@ const TIKTOK_SOURCES = [
 
 async function fetchHtml(url, useProxy, proxyUrlFn, sourceName) {
   const targetUrl = useProxy ? proxyUrlFn(url) : url;
-  const timeoutMs = useProxy ? 25000 : 20000;
+  const timeoutMs = useProxy ? 30000 : 20000;
 
   try {
     const controller = new AbortController();
@@ -186,6 +473,7 @@ async function fetchHtml(url, useProxy, proxyUrlFn, sourceName) {
     const res = await fetch(targetUrl, {
       headers: buildHeaders(),
       signal: controller.signal,
+      redirect: "follow",
     });
     clearTimeout(timeout);
 
@@ -195,7 +483,7 @@ async function fetchHtml(url, useProxy, proxyUrlFn, sourceName) {
         return html;
       }
       console.log(
-        `[TikTok Monitor] ${sourceName} — réponse invalide/trop courte (${html.length} chars)`
+        `[TikTok Monitor] ${sourceName} — réponse invalide/blocage (${html.length} chars)`
       );
       return null;
     }
@@ -212,8 +500,6 @@ async function fetchHtml(url, useProxy, proxyUrlFn, sourceName) {
 // ======================================================
 
 async function fetchTikTokPage() {
-  // Verrou anti-concurrence : si une requête est déjà en cours,
-  // on attend le même résultat au lieu d'en lancer une autre
   if (fetchInProgress && fetchPromise) {
     console.log(
       `[TikTok Monitor] ⏳ Requête déjà en cours — on attend le résultat`
@@ -221,7 +507,6 @@ async function fetchTikTokPage() {
     return fetchPromise;
   }
 
-  // Vérifier le cache
   if (cachedHtml && Date.now() - cachedHtmlTime < HTML_CACHE_TTL) {
     console.log(
       `[TikTok Monitor] ♻️ Cache HTML (${Math.round(
@@ -231,7 +516,6 @@ async function fetchTikTokPage() {
     return cachedHtml;
   }
 
-  // Lancer la requête
   fetchInProgress = true;
   fetchPromise = _doFetchTikTokPage();
 
@@ -258,14 +542,18 @@ async function _doFetchTikTokPage() {
       console.log(
         `[TikTok Monitor] ✅ ${source.name} — ${html.length} chars`
       );
-      // Mettre en cache
       cachedHtml = html;
       cachedHtmlTime = Date.now();
-      // Extraire les followers aussi pendant qu'on a le HTML
       cachedFollowers = extractFollowersFromTikTokHtml(html);
+      if (cachedFollowers !== null) {
+        console.log(
+          `[TikTok Monitor] 👥 Followers détectés: ${cachedFollowers}`
+        );
+      }
       return html;
     }
   }
+  console.error("[TikTok Monitor] ❌ Toutes les sources ont échoué");
   return null;
 }
 
@@ -285,7 +573,6 @@ async function checkLatestVideos() {
 }
 
 async function checkFollowers() {
-  // Si on a les followers en cache, les retourner directement
   if (cachedFollowers !== null) {
     console.log(
       `[TikTok Monitor] ♻️ Followers en cache: ${cachedFollowers}`
@@ -293,7 +580,6 @@ async function checkFollowers() {
     return cachedFollowers;
   }
 
-  // Sinon, faire une requête (partagée via verrou)
   const html = await fetchTikTokPage();
   if (!html) return null;
 
