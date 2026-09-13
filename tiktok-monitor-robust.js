@@ -127,49 +127,60 @@ function buildHeaders() {
 function extractAllVideosFromTikTokHtml(html) {
   const ids = new Set();
 
+  // ─── Helper : recherche récursive de tous les IDs vidéo ───
+  // TikTok change souvent la structure de son JSON.
+  // Au lieu de chercher à des chemins précis, on parcourt
+  // TOUT le JSON en profondeur et on ramasse tout ce qui
+  // ressemble à un ID vidéo (nombre de 15-20 chiffres).
+  function deepCollectVideoIds(obj, depth) {
+    if (depth > 15) return; // sécurité anti-boucle infinie
+    if (!obj || typeof obj !== "object") return;
+
+    if (Array.isArray(obj)) {
+      for (const item of obj) {
+        deepCollectVideoIds(item, depth + 1);
+      }
+      return;
+    }
+
+    for (const key of Object.keys(obj)) {
+      const val = obj[key];
+
+      // Clés qui contiennent un ID vidéo
+      if (
+        (key === "id" || key === "aweme_id") &&
+        typeof val === "string" &&
+        /^\d{15,20}$/.test(val)
+      ) {
+        ids.add(val);
+      }
+      // Variantes numériques
+      if (
+        (key === "id" || key === "aweme_id") &&
+        typeof val === "number" &&
+        val > 100000000000000
+      ) {
+        ids.add(String(val));
+      }
+
+      // Descendre dans les sous-objets
+      if (val && typeof val === "object") {
+        deepCollectVideoIds(val, depth + 1);
+      }
+    }
+  }
+
   // ─── Méthode 1 : __UNIVERSAL_DATA_FOR_REHYDRATION__ ───
-  // C'est la source de données la plus fiable sur la page profil.
   const universalMatch = html.match(
     /<script\s+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>\s*([\s\S]*?)\s*<\/script>/
   );
   if (universalMatch) {
     try {
       const data = JSON.parse(universalMatch[1]);
-      // Parcourir les scopes à la recherche des vidéos
-      for (const scopeKey of Object.keys(data)) {
-        const scope = data[scopeKey];
-        if (!scope || typeof scope !== "object") continue;
-        for (const moduleKey of Object.keys(scope)) {
-          const module = scope[moduleKey];
-          if (!module || typeof module !== "object") continue;
-
-          // itemList contient les vidéos du profil
-          if (Array.isArray(module.itemList)) {
-            for (const item of module.itemList) {
-              if (item.id) ids.add(String(item.id));
-            }
-          }
-
-          // Certaines structures imbriquées
-          if (module.itemList && Array.isArray(module.itemList)) {
-            for (const item of module.itemList) {
-              if (item.id) ids.add(String(item.id));
-            }
-          }
-
-          // Vérifier les sous-objets aussi
-          if (module.userInfo && module.userInfo.itemList) {
-            for (const item of module.userInfo.itemList) {
-              if (item.id) ids.add(String(item.id));
-            }
-          }
-        }
-      }
-      if (ids.size > 0) {
-        console.log(
-          `[TikTok Monitor] 📋 ${ids.size} ID(s) extrait(s) depuis __UNIVERSAL_DATA__`
-        );
-      }
+      deepCollectVideoIds(data, 0);
+      console.log(
+        `[TikTok Monitor] 📋 __UNIVERSAL_DATA__ → ${ids.size} ID(s) trouvé(s)`
+      );
     } catch (e) {
       console.log(
         `[TikTok Monitor] ⚠️ Parse __UNIVERSAL_DATA__ échoué: ${e.message}`
@@ -177,42 +188,17 @@ function extractAllVideosFromTikTokHtml(html) {
     }
   }
 
-  // ─── Méthode 2 : RENDER_DATA (base64 encodé) ───
+  // ─── Méthode 2 : RENDER_DATA (URL-encodé) ───
   const renderMatch = html.match(
     /<script\s+id="RENDER_DATA"\s+type="application\/json">([^<]+)<\/script>/
   );
   if (renderMatch) {
     try {
       const decoded = JSON.parse(decodeURIComponent(renderMatch[1]));
-      for (const key of Object.keys(decoded)) {
-        const section = decoded[key];
-        if (!section || typeof section !== "object") continue;
-
-        // Chercher les vidéos dans la structure
-        if (section.ItemModule) {
-          for (const itemKey of Object.keys(section.ItemModule)) {
-            const item = section.ItemModule[itemKey];
-            if (item.id) ids.add(String(item.id));
-          }
-        }
-        if (section.ItemList) {
-          for (const item of section.ItemList) {
-            if (item.id) ids.add(String(item.id));
-          }
-        }
-        // Parcours générique
-        if (section.aweme_list) {
-          for (const item of section.aweme_list) {
-            if (item.aweme_id) ids.add(String(item.aweme_id));
-            else if (item.id) ids.add(String(item.id));
-          }
-        }
-      }
-      if (ids.size > 0) {
-        console.log(
-          `[TikTok Monitor] 📋 ${ids.size} ID(s) extrait(s) depuis RENDER_DATA`
-        );
-      }
+      deepCollectVideoIds(decoded, 0);
+      console.log(
+        `[TikTok Monitor] 📋 RENDER_DATA → ${ids.size} ID(s) trouvé(s)`
+      );
     } catch (e) {
       console.log(
         `[TikTok Monitor] ⚠️ Parse RENDER_DATA échoué: ${e.message}`
@@ -227,23 +213,10 @@ function extractAllVideosFromTikTokHtml(html) {
   if (sigiMatch) {
     try {
       const data = JSON.parse(sigiMatch[1]);
-      // ItemModule contient les vidéos
-      if (data.ItemModule) {
-        for (const itemKey of Object.keys(data.ItemModule)) {
-          const item = data.ItemModule[itemKey];
-          if (item.id) ids.add(String(item.id));
-        }
-      }
-      if (data.ItemList) {
-        for (const item of data.ItemList) {
-          if (item.id) ids.add(String(item.id));
-        }
-      }
-      if (ids.size > 0) {
-        console.log(
-          `[TikTok Monitor] 📋 ${ids.size} ID(s) extrait(s) depuis SIGI_STATE`
-        );
-      }
+      deepCollectVideoIds(data, 0);
+      console.log(
+        `[TikTok Monitor] 📋 SIGI_STATE → ${ids.size} ID(s) trouvé(s)`
+      );
     } catch (e) {
       console.log(
         `[TikTok Monitor] ⚠️ Parse SIGI_STATE échoué: ${e.message}`
@@ -251,27 +224,98 @@ function extractAllVideosFromTikTokHtml(html) {
     }
   }
 
-  // ─── Méthode 4 : Regex de secours (ancienne méthode) ───
-  const urlMatches = html.match(/video\/(\d{10,})/g);
+  // ─── Méthode 4 : JSON générique dans le HTML ───
+  // Cherche des blocs JSON qui pourraient contenir des données vidéo
+  const jsonBlocks = html.match(
+    /<script[^>]*>\s*(?:window\.__NEXT_DATA__\s*=\s*|self\.__NEXT_DATA__\s*=\s*)([\s\S]*?)\s*<\/script>/g
+  );
+  if (jsonBlocks) {
+    for (const block of jsonBlocks) {
+      try {
+        const jsonStr = block.replace(/<script[^>]*>\s*(?:window\.__NEXT_DATA__\s*=\s*|self\.__NEXT_DATA__\s*=\s*)/, "").replace(/\s*<\/script>/, "");
+        const data = JSON.parse(jsonStr);
+        deepCollectVideoIds(data, 0);
+      } catch (e) {
+        // ignorer
+      }
+    }
+  }
+
+  // ─── Méthode 5 : Regex de secours ───
+  // URLs de vidéos dans le HTML
+  const urlMatches = html.match(/video\/(\d{15,20})/g);
   if (urlMatches) {
     for (const m of urlMatches) {
-      const id = m.match(/video\/(\d{10,})/);
+      const id = m.match(/video\/(\d{15,20})/);
       if (id) ids.add(id[1]);
     }
   }
 
-  const idMatches = html.match(/"id":"(\d{15,})"/g);
+  // IDs entre guillemets (15-20 chiffres = ID vidéo TikTok)
+  const idMatches = html.match(/"id"\s*:\s*"(\d{15,20})"/g);
   if (idMatches) {
     for (const m of idMatches) {
-      const id = m.match(/"id":"(\d{15,})"/);
+      const id = m.match(/"id"\s*:\s*"(\d{15,20})"/);
       if (id) ids.add(id[1]);
     }
   }
 
+  // Variantes sans guillemets
+  const idMatches2 = html.match(/"id"\s*:\s*(\d{15,20})/g);
+  if (idMatches2) {
+    for (const m of idMatches2) {
+      const id = m.match(/"id"\s*:\s*(\d{15,20})/);
+      if (id) ids.add(id[1]);
+    }
+  }
+
+  // aweme_id
+  const awemeMatches = html.match(/"aweme_id"\s*:\s*"(\d{15,20})"/g);
+  if (awemeMatches) {
+    for (const m of awemeMatches) {
+      const id = m.match(/"aweme_id"\s*:\s*"(\d{15,20})"/);
+      if (id) ids.add(id[1]);
+    }
+  }
+
+  console.log(
+    `[TikTok Monitor] 📊 Total: ${ids.size} ID(s) vidéo unique(s) extrait(s)`
+  );
   return ids.size > 0 ? ids : null;
 }
 
 function extractFollowersFromTikTokHtml(html) {
+  let found = null;
+
+  // ─── Helper : recherche récursive de followerCount ───
+  function deepFindFollowerCount(obj, depth) {
+    if (depth > 15 || found !== null) return;
+    if (!obj || typeof obj !== "object") return;
+
+    if (Array.isArray(obj)) {
+      for (const item of obj) {
+        deepFindFollowerCount(item, depth + 1);
+      }
+      return;
+    }
+
+    for (const key of Object.keys(obj)) {
+      const val = obj[key];
+
+      // followerCount est la clé qu'on cherche
+      if (key === "followerCount" && typeof val === "number" && val >= 0) {
+        found = val;
+        return;
+      }
+
+      // Descendre
+      if (val && typeof val === "object") {
+        deepFindFollowerCount(val, depth + 1);
+        if (found !== null) return;
+      }
+    }
+  }
+
   // ─── Méthode 1 : __UNIVERSAL_DATA_FOR_REHYDRATION__ ───
   const universalMatch = html.match(
     /<script\s+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>\s*([\s\S]*?)\s*<\/script>/
@@ -279,26 +323,15 @@ function extractFollowersFromTikTokHtml(html) {
   if (universalMatch) {
     try {
       const data = JSON.parse(universalMatch[1]);
-      for (const scopeKey of Object.keys(data)) {
-        const scope = data[scopeKey];
-        if (!scope || typeof scope !== "object") continue;
-        for (const moduleKey of Object.keys(scope)) {
-          const module = scope[moduleKey];
-          if (!module || typeof module !== "object") continue;
-
-          // followerCount est souvent dans userInfo.stats
-          if (module.userInfo && module.userInfo.stats) {
-            const fc = module.userInfo.stats.followerCount;
-            if (typeof fc === "number") return fc;
-          }
-          // Autre structure possible
-          if (module.stats && typeof module.stats.followerCount === "number") {
-            return module.stats.followerCount;
-          }
-        }
+      deepFindFollowerCount(data, 0);
+      if (found !== null) {
+        console.log(
+          `[TikTok Monitor] 📋 Followers depuis __UNIVERSAL_DATA__: ${found}`
+        );
+        return found;
       }
     } catch (e) {
-      // On continue avec les autres méthodes
+      // On continue
     }
   }
 
@@ -309,22 +342,42 @@ function extractFollowersFromTikTokHtml(html) {
   if (renderMatch) {
     try {
       const decoded = JSON.parse(decodeURIComponent(renderMatch[1]));
-      for (const key of Object.keys(decoded)) {
-        const section = decoded[key];
-        if (!section || typeof section !== "object") continue;
-        if (section.UserModule && section.UserModule.stats) {
-          const fc = section.UserModule.stats.followerCount;
-          if (typeof fc === "number") return fc;
-        }
+      deepFindFollowerCount(decoded, 0);
+      if (found !== null) {
+        console.log(
+          `[TikTok Monitor] 📋 Followers depuis RENDER_DATA: ${found}`
+        );
+        return found;
       }
     } catch (e) {
       // continuer
     }
   }
 
-  // ─── Méthode 3 : Regex (ancienne méthode, fallback) ───
-  const match = html.match(/"followerCount":(\d+)/);
-  return match ? parseInt(match[1], 10) : null;
+  // ─── Méthode 3 : SIGI_STATE ───
+  const sigiMatch = html.match(
+    /<script[^>]*>window\['SIGI_STATE'\]\s*=\s*JSON\.parse\('([\s\S]*?)'\);?<\/script>/
+  );
+  if (sigiMatch) {
+    try {
+      const data = JSON.parse(sigiMatch[1]);
+      deepFindFollowerCount(data, 0);
+      if (found !== null) {
+        console.log(
+          `[TikTok Monitor] 📋 Followers depuis SIGI_STATE: ${found}`
+        );
+        return found;
+      }
+    } catch (e) {
+      // continuer
+    }
+  }
+
+  // ─── Méthode 4 : Regex fallback ───
+  const match = html.match(/"followerCount"\s*:\s*(\d+)/);
+  if (match) return parseInt(match[1], 10);
+
+  return null;
 }
 
 // ======================================================
