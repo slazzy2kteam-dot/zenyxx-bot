@@ -9,10 +9,10 @@ const path = require("path");
 
 const CONFIG = {
   username: "aetherofficiel",
-  channelId: "1548231185015120054", // 📺・tiktok
+  channelId: "1548231185015120054",
   webhookUrl:
     "https://discord.com/api/webhooks/1548544268371623996/syygwOcpQdd2GLszvp4JHEjB3_lRS60lMEMbRnMvhWdXBYHZ2hl9As0A4tAm0JuPg5XB",
-  checkIntervalMs: 3 * 60 * 1000, // 3 minutes (un peu plus long pour éviter les blocages)
+  checkIntervalMs: 3 * 60 * 1000,
   maxFailures: 10,
   knownIdsFile: path.join(__dirname, "tiktok-known-ids.json"),
 };
@@ -26,10 +26,9 @@ let intervalId = null;
 let client = null;
 
 let knownVideoIds = new Set();
-let cachedHtml = null;
-let cachedHtmlTime = 0;
-const HTML_CACHE_TTL = 100 * 1000; // 100 secondes
 let cachedFollowers = null;
+let followersTimestamp = 0;
+const FOLLOWERS_TTL = 5 * 60 * 1000;
 
 let fetchInProgress = false;
 let fetchPromise = null;
@@ -44,7 +43,7 @@ function loadKnownIds() {
       const data = JSON.parse(fs.readFileSync(CONFIG.knownIdsFile, "utf8"));
       knownVideoIds = new Set(data);
       console.log(
-        `[TikTok Monitor] 📂 ${knownVideoIds.size} IDs déjà connus chargés`
+        `[TikTok Monitor] ${knownVideoIds.size} IDs deja connus charges`
       );
     }
   } catch (e) {
@@ -65,65 +64,443 @@ function saveKnownIds() {
 }
 
 // ======================================================
-// UTILITAIRE — délai aléatoire pour paraître humain
+// STRATÉGIE V4 — Contourner Cloudflare
+//
+// Au lieu de scraper directement tiktok.com (bloqué
+// par Cloudflare sur les IP de datacenter), on utilise
+// des services tiers gratuits qui ont deja resolu
+// le probleme Cloudflare :
+//
+// 1. RSSHub public — genere un flux RSS/JSON pour
+//    n'importe quel compte TikTok. Plusieurs instances
+//    publiques gratuites existent.
+//
+// 2. Urlebird — site tiers qui affiche les profils
+//    TikTok dans un format plus simple (moins de
+//    protection Cloudflare).
+//
+// 3. TikTok embed — la page /embed/@user est la
+//    moins protegee par Cloudflare (elle est faite
+//    pour etre chargee dans des iframes externes).
+//    RSSHub lui-meme utilise cette page.
+//
+// 4. Vidnoz / autres viewers TikTok
+//
+// On essaie dans cet ordre, le premier qui marche
+// suffit. Plus besoin de proxy!
 // ======================================================
 
-function randomDelay(minMs, maxMs) {
-  const ms = minMs + Math.random() * (maxMs - minMs);
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 // ======================================================
-// HEADERS
+// SOURCE 1 : RSSHub (instances publiques gratuites)
+// RSSHub expose une route /tiktok/user/@username
+// qui retourne du JSON ou du RSS avec les videos.
 // ======================================================
 
-const USER_AGENTS = [
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
-  // Mobile UA — utile pour les endpoints API mobiles
-  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
-  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+const RSSHUB_INSTANCES = [
+  "https://rsshub.app",
+  "https://hub.slarker.me",
+  "https://rsshub.rssforever.com",
+  "https://rss.shab.fun",
 ];
 
-function buildHeaders(mobile = false) {
-  const ua = mobile
-    ? USER_AGENTS[4 + Math.floor(Math.random() * 2)]
-    : USER_AGENTS[Math.floor(Math.random() * 4)];
+async function fetchFromRSSHub() {
+  for (const instance of RSSHUB_INSTANCES) {
+    const jsonUrl = `${instance}/api/tiktok/user/@${CONFIG.username}`;
+    const rssUrl = `${instance}/tiktok/user/@${CONFIG.username}`;
 
-  const webid = Math.random().toString(36).slice(2, 14);
-  const iid = Math.random().toString(36).slice(2, 14);
+    // Essayer d'abord le JSON (API RSSHub)
+    try {
+      console.log(`[TikTok Monitor] Essai RSSHub JSON: ${instance}`);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      const res = await fetch(jsonUrl, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+          Accept: "application/json",
+        },
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
 
-  const cookies = [
-    `tt_webid_v2=71${webid}`,
-    `tt_webid=71${webid}`,
-    `msToken=${iid}`,
-    `sid=t=xxx${Math.random().toString(36).slice(2, 10)}`,
-    `odin_tt=${iid}`,
-    `bm_sv=${iid}`,
-    `domain_ver=xxx`,
-  ].join("; ");
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.items && data.items.length > 0) {
+          const ids = new Set();
+          for (const item of data.items) {
+            // Extraire l'ID video depuis le lien
+            const urlMatch = (item.url || item.link || "").match(
+              /video\/(\d{15,20})/
+            );
+            if (urlMatch) ids.add(urlMatch[1]);
 
-  return {
-    "User-Agent": ua,
-    Accept: mobile
-      ? "application/json, text/plain, */*"
-      : "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9,fr;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    Referer: "https://www.tiktok.com/",
-    Cookie: cookies,
-    "Sec-Fetch-Dest": mobile ? "empty" : "document",
-    "Sec-Fetch-Mode": mobile ? "cors" : "navigate",
-    "Sec-Fetch-Site": mobile ? "same-origin" : "none",
-    "Sec-Fetch-User": mobile ? undefined : "?1",
-    "Upgrade-Insecure-Requests": mobile ? undefined : "1",
-  };
+            // Ou depuis l'ID RSSHub
+            if (item.id) {
+              const idMatch = String(item.id).match(/video\/(\d{15,20})/);
+              if (idMatch) ids.add(idMatch[1]);
+            }
+          }
+
+          if (ids.size > 0) {
+            console.log(
+              `[TikTok Monitor] RSSHub JSON (${instance}) OK — ${ids.size} video(s)`
+            );
+
+            // Essayer de recuperer les followers depuis la description du feed
+            let followers = null;
+            if (data.description) {
+              const fMatch = data.description.match(/(\d[\d,.]*\d*)\s*followers/i);
+              if (fMatch) {
+                followers = parseInt(fMatch[1].replace(/[,.]/g, ""), 10);
+              }
+            }
+
+            return { videoIds: ids, followers, source: `rsshub-json-${instance}` };
+          }
+        }
+      } else {
+        console.log(
+          `[TikTok Monitor] RSSHub JSON (${instance}) — HTTP ${res.status}`
+        );
+      }
+    } catch (e) {
+      console.log(
+        `[TikTok Monitor] RSSHub JSON (${instance}) — erreur: ${e.message}`
+      );
+    }
+
+    // Essayer le RSS (XML) si le JSON ne marche pas
+    try {
+      console.log(`[TikTok Monitor] Essai RSSHub RSS: ${instance}`);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      const res = await fetch(rssUrl, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (compatible; TikTokMonitor/4.0; +https://github.com)",
+          Accept: "application/rss+xml, application/xml, text/xml",
+        },
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (res.ok) {
+        const xml = await res.text();
+        const ids = new Set();
+
+        // Parser les IDs depuis le XML du RSS
+        const linkMatches = xml.match(/<link>[^<]*video\/(\d{15,20})[^<]*<\/link>/g);
+        if (linkMatches) {
+          for (const m of linkMatches) {
+            const id = m.match(/video\/(\d{15,20})/);
+            if (id) ids.add(id[1]);
+          }
+        }
+
+        // Au cas ou les IDs sont dans d'autres balises
+        const guidMatches = xml.match(
+          /<guid[^>]*>[^<]*video\/(\d{15,20})[^<]*<\/guid>/g
+        );
+        if (guidMatches) {
+          for (const m of guidMatches) {
+            const id = m.match(/video\/(\d{15,20})/);
+            if (id) ids.add(id[1]);
+          }
+        }
+
+        // Regex generique pour les URLs de video dans le XML
+        const allVideoUrls = xml.match(/video\/(\d{15,20})/g);
+        if (allVideoUrls) {
+          for (const m of allVideoUrls) {
+            const id = m.match(/video\/(\d{15,20})/);
+            if (id) ids.add(id[1]);
+          }
+        }
+
+        if (ids.size > 0) {
+          console.log(
+            `[TikTok Monitor] RSSHub RSS (${instance}) OK — ${ids.size} video(s)`
+          );
+          return { videoIds: ids, followers: null, source: `rsshub-rss-${instance}` };
+        }
+      } else {
+        console.log(
+          `[TikTok Monitor] RSSHub RSS (${instance}) — HTTP ${res.status}`
+        );
+      }
+    } catch (e) {
+      console.log(
+        `[TikTok Monitor] RSSHub RSS (${instance}) — erreur: ${e.message}`
+      );
+    }
+  }
+
+  return null;
 }
 
 // ======================================================
-// EXTRACTION — depuis le JSON embarqué dans le HTML
+// SOURCE 2 : Urlebird (site viewer TikTok tiers)
+// Urlebird affiche les profils et videos TikTok
+// sans la protection Cloudflare de tiktok.com.
+// ======================================================
+
+async function fetchFromUrlebird() {
+  const profileUrl = `https://urlebird.com/user/${CONFIG.username}/`;
+
+  try {
+    console.log(`[TikTok Monitor] Essai Urlebird`);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    const res = await fetch(profileUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+        Accept: "text/html",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      console.log(`[TikTok Monitor] Urlebird — HTTP ${res.status}`);
+      return null;
+    }
+
+    const html = await res.text();
+    if (!html || html.length < 500) {
+      console.log(`[TikTok Monitor] Urlebird — page vide`);
+      return null;
+    }
+
+    const ids = new Set();
+
+    // Urlebird utilise des URLs du type /user/username/video/7XXXXXXXXXXXXXXXXX
+    const videoUrlMatches = html.match(/video\/(\d{15,20})/g);
+    if (videoUrlMatches) {
+      for (const m of videoUrlMatches) {
+        const id = m.match(/video\/(\d{15,20})/);
+        if (id) ids.add(id[1]);
+      }
+    }
+
+    // Extraire les followers depuis Urlebird
+    let followers = null;
+    const followerMatch = html.match(
+      /(\d[\d,.]*\d*)\s*(?:followers|abonnes|subscribers)/i
+    );
+    if (followerMatch) {
+      followers = parseInt(followerMatch[1].replace(/[,.]/g, ""), 10);
+    }
+
+    // Chercher dans les attributs data-* aussi
+    const dataIds = html.match(/data-id="(\d{15,20})"/g);
+    if (dataIds) {
+      for (const m of dataIds) {
+        const id = m.match(/data-id="(\d{15,20})"/);
+        if (id) ids.add(id[1]);
+      }
+    }
+
+    if (ids.size > 0) {
+      console.log(
+        `[TikTok Monitor] Urlebird OK — ${ids.size} video(s), ${followers || "?"} followers`
+      );
+      return { videoIds: ids, followers, source: "urlebird" };
+    }
+
+    // Si on n'a pas trouve de videos mais des followers, c'est utile quand meme
+    if (followers !== null) {
+      console.log(
+        `[TikTok Monitor] Urlebird — ${followers} followers (pas de videos trouvees)`
+      );
+      return { videoIds: null, followers, source: "urlebird" };
+    }
+
+    console.log(`[TikTok Monitor] Urlebird — rien trouvé`);
+    return null;
+  } catch (e) {
+    console.log(`[TikTok Monitor] Urlebird — erreur: ${e.message}`);
+    return null;
+  }
+}
+
+// ======================================================
+// SOURCE 3 : TikTok Embed (page /embed/@user)
+// Cette page est la moins protegee par Cloudflare car
+// elle est faite pour etre chargee dans des iframes
+// externes (blogs, sites, etc.).
+// On utilise un proxy CORS gratuit si l'acces direct
+// echoue.
+// ======================================================
+
+async function fetchFromEmbed() {
+  const embedUrl = `https://www.tiktok.com/embed/@${CONFIG.username}`;
+
+  // Essai direct d'abord
+  try {
+    console.log(`[TikTok Monitor] Essai TikTok Embed (direct)`);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    const res = await fetch(embedUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+        Accept: "text/html",
+        Referer: "https://www.tiktok.com/",
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (res.ok) {
+      const html = await res.text();
+      const result = parseEmbedHtml(html);
+      if (result) {
+        result.source = "embed-direct";
+        return result;
+      }
+    } else {
+      console.log(
+        `[TikTok Monitor] Embed direct — HTTP ${res.status}`
+      );
+    }
+  } catch (e) {
+    console.log(`[TikTok Monitor] Embed direct — erreur: ${e.message}`);
+  }
+
+  // Essai via proxy
+  const proxies = [
+    (url) =>
+      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    (url) =>
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  ];
+
+  for (const makeProxy of proxies) {
+    try {
+      const proxyName = makeProxy.toString().match(/\/\/([^.]+)/)?.[1] || "proxy";
+      console.log(`[TikTok Monitor] Essai Embed via ${proxyName}`);
+      const proxyUrl = makeProxy(embedUrl);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 20000);
+      const res = await fetch(proxyUrl, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+        },
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (res.ok) {
+        const html = await res.text();
+        const result = parseEmbedHtml(html);
+        if (result) {
+          result.source = `embed-${proxyName}`;
+          return result;
+        }
+      } else {
+        console.log(
+          `[TikTok Monitor] Embed ${proxyName} — HTTP ${res.status}`
+        );
+      }
+    } catch (e) {
+      console.log(`[TikTok Monitor] Embed proxy — erreur: ${e.message}`);
+    }
+  }
+
+  return null;
+}
+
+function parseEmbedHtml(html) {
+  if (!html || html.length < 500) return null;
+
+  // Verifier que c'est pas une page de blocage Cloudflare
+  const challengeSigns = [
+    "Just a moment",
+    "cf-challenge",
+    "Checking your browser",
+    "Attention Required",
+    "challenge-platform",
+  ];
+  if (
+    challengeSigns.some((s) => html.includes(s)) &&
+    html.length < 80000
+  ) {
+    return null;
+  }
+
+  const ids = new Set();
+
+  // __FRONTITY_CONNECT_STATE__ — utilise par RSSHub
+  const frontityMatch = html.match(
+    /<script\s+id="__FRONTITY_CONNECT_STATE__"[^>]*>([\s\S]*?)<\/script>/
+  );
+  if (frontityMatch) {
+    try {
+      const state = JSON.parse(frontityMatch[1]);
+      deepCollectVideoIds(state, 0, ids);
+    } catch (e) {}
+  }
+
+  // __UNIVERSAL_DATA_FOR_REHYDRATION__
+  const universalMatch = html.match(
+    /<script\s+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>\s*([\s\S]*?)\s*<\/script>/
+  );
+  if (universalMatch) {
+    try {
+      const data = JSON.parse(universalMatch[1]);
+      deepCollectVideoIds(data, 0, ids);
+    } catch (e) {}
+  }
+
+  // RENDER_DATA
+  const renderMatch = html.match(
+    /<script\s+id="RENDER_DATA"\s+type="application\/json">([^<]+)<\/script>/
+  );
+  if (renderMatch) {
+    try {
+      const decoded = JSON.parse(decodeURIComponent(renderMatch[1]));
+      deepCollectVideoIds(decoded, 0, ids);
+    } catch (e) {}
+  }
+
+  // Regex fallback
+  const urlMatches = html.match(/video\/(\d{15,20})/g);
+  if (urlMatches) {
+    for (const m of urlMatches) {
+      const id = m.match(/video\/(\d{15,20})/);
+      if (id) ids.add(id[1]);
+    }
+  }
+
+  // Extraire les followers
+  let followers = null;
+  const followerMatch = html.match(/"followerCount"\s*:\s*(\d+)/);
+  if (followerMatch) {
+    followers = parseInt(followerMatch[1], 10);
+  }
+  if (followers === null) {
+    followers = deepFindFollowerCount(
+      universalMatch ? JSON.parse(universalMatch[1]) : {},
+      0
+    );
+  }
+
+  if (ids.size > 0 || followers !== null) {
+    console.log(
+      `[TikTok Monitor] Embed HTML — ${ids.size} video(s), ${followers || "?"} followers`
+    );
+    return { videoIds: ids.size > 0 ? ids : null, followers };
+  }
+
+  return null;
+}
+
+// ======================================================
+// EXTRACTION RECURSIVE PROFONDE
 // ======================================================
 
 function deepCollectVideoIds(obj, depth, ids) {
@@ -181,432 +558,121 @@ function deepFindFollowerCount(obj, depth) {
 }
 
 // ======================================================
-// EXTRACTION — depuis HTML (pages profil/embed)
+// SOURCE 4 : TikTok Profile page via proxy
+// (dernier recours — meme strategie que V3 mais en
+//  dernier seulement)
 // ======================================================
 
-function extractAllVideosFromTikTokHtml(html) {
-  const ids = new Set();
+async function fetchFromProfileViaProxy() {
+  const profileUrl = `https://www.tiktok.com/@${CONFIG.username}`;
 
-  // __UNIVERSAL_DATA_FOR_REHYDRATION__
-  const universalMatch = html.match(
-    /<script\s+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>\s*([\s\S]*?)\s*<\/script>/
-  );
-  if (universalMatch) {
-    try {
-      const data = JSON.parse(universalMatch[1]);
-      deepCollectVideoIds(data, 0, ids);
-      console.log(
-        `[TikTok Monitor] 📋 __UNIVERSAL_DATA__ → ${ids.size} ID(s)`
-      );
-    } catch (e) {
-      console.log(`[TikTok Monitor] ⚠️ Parse __UNIVERSAL_DATA__ échoué: ${e.message}`);
-    }
-  }
-
-  // RENDER_DATA
-  const renderMatch = html.match(
-    /<script\s+id="RENDER_DATA"\s+type="application\/json">([^<]+)<\/script>/
-  );
-  if (renderMatch) {
-    try {
-      const decoded = JSON.parse(decodeURIComponent(renderMatch[1]));
-      deepCollectVideoIds(decoded, 0, ids);
-      console.log(`[TikTok Monitor] 📋 RENDER_DATA → ${ids.size} ID(s)`);
-    } catch (e) {
-      console.log(`[TikTok Monitor] ⚠️ Parse RENDER_DATA échoué: ${e.message}`);
-    }
-  }
-
-  // SIGI_STATE
-  const sigiMatch = html.match(
-    /window\['SIGI_STATE'\]\s*=\s*JSON\.parse\('([\s\S]*?)'\)/
-  );
-  if (sigiMatch) {
-    try {
-      const data = JSON.parse(sigiMatch[1]);
-      deepCollectVideoIds(data, 0, ids);
-      console.log(`[TikTok Monitor] 📋 SIGI_STATE → ${ids.size} ID(s)`);
-    } catch (e) {
-      console.log(`[TikTok Monitor] ⚠️ Parse SIGI_STATE échoué: ${e.message}`);
-    }
-  }
-
-  // Regex fallback
-  const urlMatches = html.match(/video\/(\d{15,20})/g);
-  if (urlMatches) {
-    for (const m of urlMatches) {
-      const id = m.match(/video\/(\d{15,20})/);
-      if (id) ids.add(id[1]);
-    }
-  }
-  const idMatches = html.match(/"id"\s*:\s*"?(\d{15,20})"?/g);
-  if (idMatches) {
-    for (const m of idMatches) {
-      const id = m.match(/"id"\s*:\s*"?(\d{15,20})"?/);
-      if (id) ids.add(id[1]);
-    }
-  }
-  const awemeMatches = html.match(/"aweme_id"\s*:\s*"?(\d{15,20})"?/g);
-  if (awemeMatches) {
-    for (const m of awemeMatches) {
-      const id = m.match(/"aweme_id"\s*:\s*"?(\d{15,20})"?/);
-      if (id) ids.add(id[1]);
-    }
-  }
-
-  console.log(`[TikTok Monitor] 📊 Total HTML: ${ids.size} ID(s) vidéo unique(s)`);
-  return ids.size > 0 ? ids : null;
-}
-
-function extractFollowersFromTikTokHtml(html) {
-  const universalMatch = html.match(
-    /<script\s+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>\s*([\s\S]*?)\s*<\/script>/
-  );
-  if (universalMatch) {
-    try {
-      const data = JSON.parse(universalMatch[1]);
-      const found = deepFindFollowerCount(data, 0);
-      if (found !== null) return found;
-    } catch (e) {}
-  }
-
-  const renderMatch = html.match(
-    /<script\s+id="RENDER_DATA"\s+type="application\/json">([^<]+)<\/script>/
-  );
-  if (renderMatch) {
-    try {
-      const decoded = JSON.parse(decodeURIComponent(renderMatch[1]));
-      const found = deepFindFollowerCount(decoded, 0);
-      if (found !== null) return found;
-    } catch (e) {}
-  }
-
-  const match = html.match(/"followerCount"\s*:\s*(\d+)/);
-  return match ? parseInt(match[1], 10) : null;
-}
-
-// ======================================================
-// EXTRACTION — depuis JSON API (endpoints internes TikTok)
-// ======================================================
-
-function extractVideosFromApiResponse(data) {
-  const ids = new Set();
-
-  // Structure itemList (API interne TikTok)
-  if (data.itemList && Array.isArray(data.itemList)) {
-    for (const item of data.itemList) {
-      if (item.id) ids.add(String(item.id));
-      if (item.aweme_id) ids.add(String(item.aweme_id));
-    }
-    console.log(
-      `[TikTok Monitor] 📋 API itemList → ${ids.size} ID(s)`
-    );
-  }
-
-  // Structure aweme_list
-  if (data.aweme_list && Array.isArray(data.aweme_list)) {
-    for (const item of data.aweme_list) {
-      if (item.aweme_id) ids.add(String(item.aweme_id));
-      else if (item.id) ids.add(String(item.id));
-    }
-    console.log(
-      `[TikTok Monitor] 📋 API aweme_list → ${ids.size} ID(s)`
-    );
-  }
-
-  // Parcours récursif de secours
-  deepCollectVideoIds(data, 0, ids);
-
-  return ids.size > 0 ? ids : null;
-}
-
-function extractFollowersFromApiResponse(data) {
-  // userInfo dans l'API
-  if (data.userInfo) {
-    if (data.userInfo.stats && typeof data.userInfo.stats.followerCount === "number") {
-      return data.userInfo.stats.followerCount;
-    }
-  }
-  // userModule
-  if (data.userModule) {
-    const fc = deepFindFollowerCount(data.userModule, 0);
-    if (fc !== null) return fc;
-  }
-  // Recherche récursive
-  const fc = deepFindFollowerCount(data, 0);
-  return fc;
-}
-
-// ======================================================
-// VALIDATION DE PAGE HTML
-// ======================================================
-
-function isValidPage(html) {
-  if (!html || html.length < 500) return false;
-
-  const challengeSigns = [
-    "Just a moment",
-    "cf-challenge",
-    "Enable JavaScript",
-    "Checking your browser",
-    "Please Wait",
-    "Attention Required",
-    "challenge-platform",
-    "cf-browser-verification",
+  const proxies = [
+    (url) =>
+      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    (url) =>
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
   ];
 
-  const hasChallenge = challengeSigns.some((s) =>
-    html.toLowerCase().includes(s.toLowerCase())
-  );
-  if (hasChallenge && html.length < 80000) return false;
+  for (const makeProxy of proxies) {
+    try {
+      const proxyName = makeProxy.toString().match(/\/\/([^.]+)/)?.[1] || "proxy";
+      console.log(`[TikTok Monitor] Essai Profile via ${proxyName}`);
+      const proxyUrl = makeProxy(profileUrl);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 20000);
+      const res = await fetch(proxyUrl, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+          Accept: "text/html",
+        },
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
 
-  const hasTikTokContent =
-    html.includes("tiktok.com") ||
-    html.includes("TikTok") ||
-    html.includes("tiktok") ||
-    html.includes("__UNIVERSAL_DATA") ||
-    html.includes("RENDER_DATA") ||
-    html.includes("SIGI_STATE");
+      if (res.ok) {
+        const html = await res.text();
+        if (html.length > 5000 && !html.includes("Just a moment")) {
+          const ids = new Set();
 
-  return hasTikTokContent;
-}
+          // Parser les donnees JSON embarquees
+          const universalMatch = html.match(
+            /<script\s+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>\s*([\s\S]*?)\s*<\/script>/
+          );
+          if (universalMatch) {
+            try {
+              const data = JSON.parse(universalMatch[1]);
+              deepCollectVideoIds(data, 0, ids);
+            } catch (e) {}
+          }
 
-// ======================================================
-// SOURCES — 3 types : API JSON > HTML profil > HTML embed
-//
-// Les API internes TikTok retournent du JSON propre,
-// pas besoin de scraper le HTML. C'est beaucoup plus
-// fiable et plus léger. On les essaie en premier.
-//
-// L'API /api/post/item_list/ retourne la liste des
-// vidéos d'un utilisateur.
-// L'API /api/user/detail/ retourne le profil
-// (avec followerCount).
-// ======================================================
+          const renderMatch = html.match(
+            /<script\s+id="RENDER_DATA"\s+type="application\/json">([^<]+)<\/script>/
+          );
+          if (renderMatch) {
+            try {
+              const decoded = JSON.parse(decodeURIComponent(renderMatch[1]));
+              deepCollectVideoIds(decoded, 0, ids);
+            } catch (e) {}
+          }
 
-const TIKTOK_SOURCES = [
-  // ───────────── API JSON (priorité maximale) ─────────────
-  // L'API interne de TikTok pour lister les vidéos d'un user
-  {
-    name: "api-itemlist-direct",
-    type: "api",
-    buildUrl: (u) =>
-      `https://www.tiktok.com/api/post/item_list/?aid=1988&count=30&secUid=&username=${u}&verifyFp=xxx`,
-    useProxy: false,
-    mobile: true,
-  },
-  {
-    name: "api-itemlist-codetabs",
-    type: "api",
-    buildUrl: (u) =>
-      `https://www.tiktok.com/api/post/item_list/?aid=1988&count=30&secUid=&username=${u}&verifyFp=xxx`,
-    useProxy: true,
-    mobile: true,
-    proxyUrl: (url) =>
-      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-  },
-  {
-    name: "api-itemlist-allorigins",
-    type: "api",
-    buildUrl: (u) =>
-      `https://www.tiktok.com/api/post/item_list/?aid=1988&count=30&secUid=&username=${u}&verifyFp=xxx`,
-    useProxy: true,
-    mobile: true,
-    proxyUrl: (url) =>
-      `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-  },
-  // API détail utilisateur (followers)
-  {
-    name: "api-userdetail-direct",
-    type: "api-user",
-    buildUrl: (u) =>
-      `https://www.tiktok.com/api/user/detail/?aid=1988&username=${u}&verifyFp=xxx`,
-    useProxy: false,
-    mobile: true,
-  },
-  {
-    name: "api-userdetail-codetabs",
-    type: "api-user",
-    buildUrl: (u) =>
-      `https://www.tiktok.com/api/user/detail/?aid=1988&username=${u}&verifyFp=xxx`,
-    useProxy: true,
-    mobile: true,
-    proxyUrl: (url) =>
-      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-  },
-  // ───────────── Pages HTML profil ─────────────
-  {
-    name: "profile-direct",
-    type: "html",
-    buildUrl: (u) => `https://www.tiktok.com/@${u}`,
-    useProxy: false,
-    mobile: false,
-  },
-  {
-    name: "profile-codetabs",
-    type: "html",
-    buildUrl: (u) => `https://www.tiktok.com/@${u}`,
-    useProxy: true,
-    mobile: false,
-    proxyUrl: (url) =>
-      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-  },
-  {
-    name: "profile-allorigins",
-    type: "html",
-    buildUrl: (u) => `https://www.tiktok.com/@${u}`,
-    useProxy: true,
-    mobile: false,
-    proxyUrl: (url) =>
-      `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-  },
-  {
-    name: "profile-corsproxy",
-    type: "html",
-    buildUrl: (u) => `https://www.tiktok.com/@${u}`,
-    useProxy: true,
-    mobile: false,
-    proxyUrl: (url) =>
-      `https://corsproxy.io/?${encodeURIComponent(url)}`,
-  },
-  // ───────────── Mobile HTML ─────────────
-  {
-    name: "mobile-direct",
-    type: "html",
-    buildUrl: (u) => `https://m.tiktok.com/@${u}`,
-    useProxy: false,
-    mobile: true,
-  },
-  {
-    name: "mobile-codetabs",
-    type: "html",
-    buildUrl: (u) => `https://m.tiktok.com/@${u}`,
-    useProxy: true,
-    mobile: true,
-    proxyUrl: (url) =>
-      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-  },
-  // ───────────── Embed (dernier recours) ─────────────
-  {
-    name: "embed-direct",
-    type: "html",
-    buildUrl: (u) => `https://www.tiktok.com/embed/@${u}`,
-    useProxy: false,
-    mobile: false,
-  },
-  {
-    name: "embed-codetabs",
-    type: "html",
-    buildUrl: (u) => `https://www.tiktok.com/embed/@${u}`,
-    useProxy: true,
-    mobile: false,
-    proxyUrl: (url) =>
-      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-  },
-  {
-    name: "embed-allorigins",
-    type: "html",
-    buildUrl: (u) => `https://www.tiktok.com/embed/@${u}`,
-    useProxy: true,
-    mobile: false,
-    proxyUrl: (url) =>
-      `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-  },
-];
+          // Regex fallback
+          const urlMatches = html.match(/video\/(\d{15,20})/g);
+          if (urlMatches) {
+            for (const m of urlMatches) {
+              const id = m.match(/video\/(\d{15,20})/);
+              if (id) ids.add(id[1]);
+            }
+          }
 
-// ======================================================
-// FETCH — générique (HTML ou JSON API)
-// ======================================================
+          let followers = null;
+          const followerMatch = html.match(/"followerCount"\s*:\s*(\d+)/);
+          if (followerMatch) {
+            followers = parseInt(followerMatch[1], 10);
+          }
 
-async function fetchFromSource(source) {
-  const url = source.buildUrl(CONFIG.username);
-  const targetUrl = source.useProxy ? source.proxyUrl(url) : url;
-  const timeoutMs = source.useProxy ? 30000 : 15000;
-  const isApi = source.type === "api" || source.type === "api-user";
-
-  // Petit délai aléatoire entre les sources (500ms-2s)
-  await randomDelay(500, 2000);
-
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    const res = await fetch(targetUrl, {
-      headers: buildHeaders(source.mobile),
-      signal: controller.signal,
-      redirect: "follow",
-    });
-    clearTimeout(timeout);
-
-    if (!res.ok) {
-      console.log(`[TikTok Monitor] ${source.name} — HTTP ${res.status}`);
-      return null;
-    }
-
-    const text = await res.text();
-
-    if (isApi) {
-      // L'API retourne du JSON — on essaie de le parser
-      try {
-        const json = JSON.parse(text);
-        // Vérifier que c'est bien une réponse TikTok valide
-        if (json.statusCode === 0 || json.itemList || json.aweme_list || json.userInfo || json.userModule) {
-          console.log(`[TikTok Monitor] ✅ ${source.name} — JSON API valide`);
-          return { type: source.type, data: json };
+          if (ids.size > 0 || followers !== null) {
+            console.log(
+              `[TikTok Monitor] Profile ${proxyName} OK — ${ids.size} video(s), ${followers || "?"} followers`
+            );
+            return {
+              videoIds: ids.size > 0 ? ids : null,
+              followers,
+              source: `profile-${proxyName}`,
+            };
+          }
         }
-        // L'API peut renvoyer une page HTML de blocage au lieu de JSON
-        if (isValidPage(text)) {
-          console.log(`[TikTok Monitor] ${source.name} — API a renvoyé du HTML au lieu de JSON`);
-          return { type: "html", data: text };
-        }
-        console.log(`[TikTok Monitor] ${source.name} — API réponse inattendue (statusCode: ${json.statusCode || 'N/A'})`);
-        return null;
-      } catch (e) {
-        // Pas du JSON — vérifier si c'est du HTML valide
-        if (isValidPage(text)) {
-          console.log(`[TikTok Monitor] ${source.name} — Réponse HTML au lieu de JSON (OK, on utilise)`);
-          return { type: "html", data: text };
-        }
-        console.log(`[TikTok Monitor] ${source.name} — Réponse non-JSON, non-HTML`);
-        return null;
+      } else {
+        console.log(
+          `[TikTok Monitor] Profile ${proxyName} — HTTP ${res.status}`
+        );
       }
-    } else {
-      // Source HTML
-      if (isValidPage(text)) {
-        console.log(`[TikTok Monitor] ✅ ${source.name} — ${text.length} chars`);
-        return { type: "html", data: text };
-      }
-      console.log(`[TikTok Monitor] ${source.name} — HTML invalide/blocage (${text.length} chars)`);
-      return null;
+    } catch (e) {
+      console.log(
+        `[TikTok Monitor] Profile proxy — erreur: ${e.message}`
+      );
     }
-  } catch (e) {
-    console.log(`[TikTok Monitor] ${source.name} — erreur: ${e.message}`);
-    return null;
   }
+
+  return null;
 }
 
 // ======================================================
-// FETCH GLOBAL — essaie toutes les sources
+// FETCH GLOBAL — essaie toutes les sources dans l'ordre
 // ======================================================
 
 async function fetchTikTokData() {
   if (fetchInProgress && fetchPromise) {
-    console.log(`[TikTok Monitor] ⏳ Requête déjà en cours — on attend`);
+    console.log(`[TikTok Monitor] Requete deja en cours`);
     return fetchPromise;
-  }
-
-  if (cachedHtml && Date.now() - cachedHtmlTime < HTML_CACHE_TTL) {
-    console.log(
-      `[TikTok Monitor] ♻️ Cache (${Math.round((Date.now() - cachedHtmlTime) / 1000)}s)`
-    );
-    return { videoIds: null, followers: cachedFollowers, fromCache: true };
   }
 
   fetchInProgress = true;
   fetchPromise = _doFetchTikTokData();
 
   try {
-    const result = await fetchPromise;
-    return result;
+    return await fetchPromise;
   } finally {
     fetchInProgress = false;
     fetchPromise = null;
@@ -616,85 +682,99 @@ async function fetchTikTokData() {
 async function _doFetchTikTokData() {
   let allVideoIds = new Set();
   let followers = null;
-  let gotHtml = false;
 
-  for (const source of TIKTOK_SOURCES) {
-    console.log(`[TikTok Monitor] 🔄 Source: ${source.name}`);
-    const result = await fetchFromSource(source);
+  // ───── SOURCE 1 : RSSHub (meilleure chance) ─────
+  const rsshubResult = await fetchFromRSSHub();
+  if (rsshubResult) {
+    if (rsshubResult.videoIds) {
+      for (const id of rsshubResult.videoIds) allVideoIds.add(id);
+    }
+    if (rsshubResult.followers !== null) followers = rsshubResult.followers;
 
-    if (!result) continue;
-
-    if (result.type === "api" || result.type === "api-user") {
-      const apiData = result.data;
-
-      // Extraire les vidéos de l'API
-      if (result.type === "api") {
-        const vids = extractVideosFromApiResponse(apiData);
-        if (vids) {
-          for (const id of vids) allVideoIds.add(id);
-          console.log(
-            `[TikTok Monitor] 🎬 ${vids.size} vidéo(s) depuis API (total: ${allVideoIds.size})`
-          );
+    // Si RSSHub nous donne des videos, on est bon
+    if (allVideoIds.size > 0) {
+      console.log(
+        `[TikTok Monitor] RSSHub OK — ${allVideoIds.size} video(s) [${rsshubResult.source}]`
+      );
+      // On essaie quand meme Urlebird pour les followers si RSSHub ne les a pas
+      if (followers === null) {
+        const urlResult = await fetchFromUrlebird();
+        if (urlResult && urlResult.followers !== null) {
+          followers = urlResult.followers;
         }
       }
-
-      // Extraire les followers de l'API
-      const fc = extractFollowersFromApiResponse(apiData);
-      if (fc !== null) {
-        followers = fc;
-        console.log(`[TikTok Monitor] 👥 Followers API: ${followers}`);
-      }
-
-      // Si on a des vidéos ET des followers, on est bon
-      if (allVideoIds.size > 0 && followers !== null) {
-        console.log(
-          `[TikTok Monitor] ✅ API complète — ${allVideoIds.size} vidéos, ${followers} followers`
-        );
-        cachedFollowers = followers;
-        cachedHtmlTime = Date.now();
-        return { videoIds: allVideoIds, followers };
-      }
-    }
-
-    if (result.type === "html") {
-      gotHtml = true;
-      const html = result.data;
-
-      // Extraire vidéos du HTML
-      const vids = extractAllVideosFromTikTokHtml(html);
-      if (vids) {
-        for (const id of vids) allVideoIds.add(id);
-      }
-
-      // Extraire followers du HTML
-      const fc = extractFollowersFromTikTokHtml(html);
-      if (fc !== null) {
-        followers = fc;
-        console.log(`[TikTok Monitor] 👥 Followers HTML: ${followers}`);
-      }
-
-      // Mettre en cache le HTML
-      cachedHtml = html;
-      cachedHtmlTime = Date.now();
       cachedFollowers = followers;
-
-      if (allVideoIds.size > 0) {
-        console.log(
-          `[TikTok Monitor] ✅ HTML — ${allVideoIds.size} vidéos, ${followers || '?'} followers`
-        );
-        return { videoIds: allVideoIds, followers };
-      }
+      followersTimestamp = Date.now();
+      return { videoIds: allVideoIds, followers };
     }
   }
 
-  // Retourner ce qu'on a, même partiel
+  // ───── SOURCE 2 : Urlebird ─────
+  const urlebirdResult = await fetchFromUrlebird();
+  if (urlebirdResult) {
+    if (urlebirdResult.videoIds) {
+      for (const id of urlebirdResult.videoIds) allVideoIds.add(id);
+    }
+    if (urlebirdResult.followers !== null) followers = urlebirdResult.followers;
+
+    if (allVideoIds.size > 0) {
+      console.log(
+        `[TikTok Monitor] Urlebird OK — ${allVideoIds.size} video(s)`
+      );
+      cachedFollowers = followers;
+      followersTimestamp = Date.now();
+      return { videoIds: allVideoIds, followers };
+    }
+  }
+
+  // ───── SOURCE 3 : TikTok Embed ─────
+  const embedResult = await fetchFromEmbed();
+  if (embedResult) {
+    if (embedResult.videoIds) {
+      for (const id of embedResult.videoIds) allVideoIds.add(id);
+    }
+    if (embedResult.followers !== null && followers === null) {
+      followers = embedResult.followers;
+    }
+
+    if (allVideoIds.size > 0) {
+      console.log(
+        `[TikTok Monitor] Embed OK — ${allVideoIds.size} video(s) [${embedResult.source}]`
+      );
+      cachedFollowers = followers;
+      followersTimestamp = Date.now();
+      return { videoIds: allVideoIds, followers };
+    }
+  }
+
+  // ───── SOURCE 4 : TikTok Profile via proxy (dernier recours) ─────
+  const profileResult = await fetchFromProfileViaProxy();
+  if (profileResult) {
+    if (profileResult.videoIds) {
+      for (const id of profileResult.videoIds) allVideoIds.add(id);
+    }
+    if (profileResult.followers !== null && followers === null) {
+      followers = profileResult.followers;
+    }
+
+    if (allVideoIds.size > 0) {
+      console.log(
+        `[TikTok Monitor] Profile proxy OK — ${allVideoIds.size} video(s)`
+      );
+      cachedFollowers = followers;
+      followersTimestamp = Date.now();
+      return { videoIds: allVideoIds, followers };
+    }
+  }
+
+  // Retourner ce qu'on a meme partiel
   if (allVideoIds.size > 0 || followers !== null) {
     cachedFollowers = followers;
-    cachedHtmlTime = Date.now();
+    followersTimestamp = Date.now();
     return { videoIds: allVideoIds.size > 0 ? allVideoIds : null, followers };
   }
 
-  console.error("[TikTok Monitor] ❌ Toutes les sources ont échoué");
+  console.error("[TikTok Monitor] Toutes les sources ont echoue");
   return null;
 }
 
@@ -705,13 +785,20 @@ async function _doFetchTikTokData() {
 async function checkLatestVideos() {
   const result = await fetchTikTokData();
   if (!result || !result.videoIds) return null;
-  console.log(`[TikTok Monitor] ✅ ${result.videoIds.size} vidéo(s) trouvée(s)`);
+  console.log(
+    `[TikTok Monitor] ${result.videoIds.size} video(s) trouvee(s)`
+  );
   return result.videoIds;
 }
 
 async function checkFollowers() {
-  if (cachedFollowers !== null) {
-    console.log(`[TikTok Monitor] ♻️ Followers en cache: ${cachedFollowers}`);
+  if (
+    cachedFollowers !== null &&
+    Date.now() - followersTimestamp < FOLLOWERS_TTL
+  ) {
+    console.log(
+      `[TikTok Monitor] Followers en cache: ${cachedFollowers}`
+    );
     return cachedFollowers;
   }
   const result = await fetchTikTokData();
@@ -728,10 +815,10 @@ async function sendVideoNotification(guild, videoId) {
   if (CONFIG.webhookUrl) {
     try {
       const embed = {
-        title: "\U0001F3AC Nouvelle vidéo TikTok !",
+        title: "Nouvelle video TikTok !",
         url: videoUrl,
         color: 0x00f2ea,
-        description: `**@${CONFIG.username}** vient de poster une nouvelle vidéo !\nVa la regarder \U0001F525`,
+        description: `**@${CONFIG.username}** vient de poster une nouvelle video !\nVa la regarder`,
         timestamp: new Date().toISOString(),
       };
 
@@ -739,14 +826,13 @@ async function sendVideoNotification(guild, videoId) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          username: "\u{1D292}\u{1D294}\u{1D271}\u{1D26F}\u{1D31E}\u{1D2FF} Tiktok",
-          avatar_url: "<<url_7:png>>",
-          content: `@everyone **Nouvelle vidéo TikTok !** @${CONFIG.username} vient de poster !\n${videoUrl}`,
+          username: "TikTok Monitor",
+          content: `@everyone **Nouvelle video TikTok !** @${CONFIG.username} vient de poster !\n${videoUrl}`,
           embeds: [embed],
         }),
       });
       console.log(
-        `[TikTok Monitor] \U0001F4E2 Notification webhook envoyée ! Vidéo: ${videoId}`
+        `[TikTok Monitor] Notification webhook envoyee ! Video: ${videoId}`
       );
       return;
     } catch (err) {
@@ -765,22 +851,22 @@ async function sendVideoNotification(guild, videoId) {
   }
 
   const embed = new EmbedBuilder()
-    .setTitle("\U0001F3AC Nouvelle vidéo TikTok !")
+    .setTitle("Nouvelle video TikTok !")
     .setURL(videoUrl)
     .setColor(0x00f2ea)
     .setDescription(
-      `**@${CONFIG.username}** vient de poster une nouvelle vidéo !\n` +
-        `Va la regarder \U0001F525`
+      `**@${CONFIG.username}** vient de poster une nouvelle video !\n` +
+        `Va la regarder`
     )
     .setTimestamp();
 
   try {
     await channel.send({
-      content: `@everyone **Nouvelle vidéo TikTok !** @${CONFIG.username} vient de poster !\n${videoUrl}`,
+      content: `@everyone **Nouvelle video TikTok !** @${CONFIG.username} vient de poster !\n${videoUrl}`,
       embeds: [embed],
     });
     console.log(
-      `[TikTok Monitor] \U0001F4E2 Notification bot envoyée ! Vidéo: ${videoId}`
+      `[TikTok Monitor] Notification bot envoyee ! Video: ${videoId}`
     );
   } catch (err) {
     console.error(`[TikTok Monitor] Erreur envoi: ${err.message}`);
@@ -808,7 +894,7 @@ async function monitorLoop() {
       }
 
       if (newIds.length === 0) {
-        console.log("[TikTok Monitor] Pas de nouvelle vidéo");
+        console.log("[TikTok Monitor] Pas de nouvelle video");
       } else if (knownVideoIds.size === 0) {
         // Premier lancement : on enregistre tout sans notifier
         for (const id of newIds) {
@@ -816,13 +902,13 @@ async function monitorLoop() {
         }
         saveKnownIds();
         console.log(
-          `[TikTok Monitor] Premier lancement — ${newIds.length} IDs initiaux enregistrés (pas de notification)`
+          `[TikTok Monitor] Premier lancement — ${newIds.length} IDs initiaux enregistres (pas de notification)`
         );
       } else {
-        // Vraies nouvelles vidéos
+        // Vraies nouvelles videos
         for (const id of newIds) {
           console.log(
-            `[TikTok Monitor] \U0001F3AC Nouvelle vidéo détectée ! ID: ${id}`
+            `[TikTok Monitor] Nouvelle video detectee ! ID: ${id}`
           );
           knownVideoIds.add(id);
           const guild = client.guilds.cache.values().next().value;
@@ -833,7 +919,7 @@ async function monitorLoop() {
     } else {
       consecutiveFailures++;
       console.error(
-        `[TikTok Monitor] \u274C Échec (${consecutiveFailures}/${CONFIG.maxFailures})`
+        `[TikTok Monitor] Echec (${consecutiveFailures}/${CONFIG.maxFailures})`
       );
 
       if (consecutiveFailures >= CONFIG.maxFailures) {
@@ -843,7 +929,7 @@ async function monitorLoop() {
           if (channel) {
             await channel
               .send(
-                "\u26A0\uFE0F Le moniteur TikTok n'arrive pas à récupérer les données depuis un moment. Tous les proxies ont échoué."
+                "Le moniteur TikTok n'arrive pas a recuperer les donnees depuis un moment. Toutes les sources ont echoue."
               )
               .catch(() => {});
           }
@@ -866,7 +952,7 @@ function startTikTokMonitor(discordClient) {
   monitorLoop();
   intervalId = setInterval(monitorLoop, CONFIG.checkIntervalMs);
   console.log(
-    `[TikTok Monitor] Démarré — vérification toutes les ${
+    `[TikTok Monitor] Demarre — verification toutes les ${
       CONFIG.checkIntervalMs / 1000
     }s`
   );
