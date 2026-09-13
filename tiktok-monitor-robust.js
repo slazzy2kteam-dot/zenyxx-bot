@@ -301,34 +301,37 @@ async function sendVideoNotification(guild, videoId) {
 async function monitorLoop() {
   if (!client) return;
 
-  for (const guild of client.guilds.cache.values()) {
-    try {
-      const videoId = await checkLatestVideo();
+  try {
+    const videoId = await checkLatestVideo();
 
-      if (videoId) {
-        consecutiveFailures = 0;
+    if (videoId) {
+      consecutiveFailures = 0;
 
-        if (lastVideoId === null) {
-          lastVideoId = videoId;
-          console.log(
-            `[TikTok Monitor] Premier lancement — ID initial: ${videoId}`
-          );
-        } else if (videoId !== lastVideoId) {
-          console.log(
-            `[TikTok Monitor] 🎬 Nouvelle vidéo ! Ancien: ${lastVideoId} → Nouveau: ${videoId}`
-          );
-          lastVideoId = videoId;
-          await sendVideoNotification(guild, videoId);
-        } else {
-          console.log("[TikTok Monitor] Pas de nouvelle vidéo");
-        }
-      } else {
-        consecutiveFailures++;
-        console.error(
-          `[TikTok Monitor] ❌ Échec (${consecutiveFailures}/${CONFIG.maxFailures})`
+      if (lastVideoId === null) {
+        lastVideoId = videoId;
+        console.log(
+          `[TikTok Monitor] Premier lancement — ID initial: ${videoId}`
         );
+      } else if (videoId !== lastVideoId) {
+        console.log(
+          `[TikTok Monitor] 🎬 Nouvelle vidéo ! Ancien: ${lastVideoId} → Nouveau: ${videoId}`
+        );
+        lastVideoId = videoId;
+        // Envoyer la notification une seule fois (le salon cible est fixe dans CONFIG)
+        const guild = client.guilds.cache.values().next().value;
+        if (guild) await sendVideoNotification(guild, videoId);
+      } else {
+        console.log("[TikTok Monitor] Pas de nouvelle vidéo");
+      }
+    } else {
+      consecutiveFailures++;
+      console.error(
+        `[TikTok Monitor] ❌ Échec (${consecutiveFailures}/${CONFIG.maxFailures})`
+      );
 
-        if (consecutiveFailures >= CONFIG.maxFailures) {
+      if (consecutiveFailures >= CONFIG.maxFailures) {
+        const guild = client.guilds.cache.values().next().value;
+        if (guild) {
           const channel = guild.channels.cache.get(CONFIG.channelId);
           if (channel) {
             await channel
@@ -337,12 +340,12 @@ async function monitorLoop() {
               )
               .catch(() => {});
           }
-          consecutiveFailures = 0;
         }
+        consecutiveFailures = 0;
       }
-    } catch (e) {
-      console.error(`[TikTok Monitor] Erreur boucle: ${e.message}`);
     }
+  } catch (e) {
+    console.error(`[TikTok Monitor] Erreur boucle: ${e.message}`);
   }
 }
 
