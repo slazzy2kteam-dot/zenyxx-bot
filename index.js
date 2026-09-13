@@ -3224,6 +3224,12 @@ client.once(
 
     try {
 
+      // Supprimer les commandes globales orphelines (cause de doublons)
+      if (client.application) {
+        await client.application.commands.set([]);
+        console.log("🧹 Commandes globales nettoyées");
+      }
+
       for (
         const guild
         of client.guilds.cache.values()
