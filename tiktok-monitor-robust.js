@@ -253,8 +253,8 @@ async function sendVideoNotification(guild, videoId) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          username: "TikTok",
-          avatar_url: "https://cdn.pixabay.com/photo/2021/02/01/13/41/tiktok-5971185_1280.png",
+          username: "𝒁𝒆𝒏𝒚𝑿𝒙 Tiktok",
+          avatar_url: "https://storage.googleapis.com/ot-pt/present_files/2026-09-13/anonymous/default/1f018aec17fb44529f0310067b3fae75_.png?Expires=1791870576&GoogleAccessId=gcs-owner%40oreateai-434511.iam.gserviceaccount.com&Signature=NnzB%2BlSUAh%2Brwa2jmyg4LCmZmtQ3AOdKGYnaXmqzbSPQ8cDRyfpGnyFdeBD08t1IrfdqdHbT%2Bb1Fksn8jYKIOUVtMPo1cm5gdDL5S0%2B81Eq%2BFtzDK8MquOBkAtX6v1QAea6MsiCy8sowlveYZOrui0tp4pegRpr1DZidLHJQL9pqE2r1Pw8jLBVp9W4ezXyAUAoJxv4Dm5FUL9nM79mLhCMfAD5rXGyINXW6zH94tw5sQRTYMKJB5qcNnDEa5vNVoTzndKVVUhJLdbReKJcthydUy4vuTZBzRnRLk5%2B%2Focq5TVkihzgcExvof28qLSSoaBisMLdG45%2BJ0VDnsVO1iA%3D%3D",
           content: `@everyone **Nouvelle vidéo TikTok !** @${CONFIG.username} vient de poster !\n${videoUrl}`,
           embeds: [embed],
         }),
