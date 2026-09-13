@@ -22,6 +22,7 @@ const {
 
 const { createCanvas, loadImage } = require("@napi-rs/canvas");
 const express = require("express");
+const fetch = require("node-fetch");
 const fs = require("fs");
 
 // ======================================================
@@ -115,6 +116,7 @@ const TWITCH_CLIENT_ID = process.env.TWITCH_CLIENT_ID || "xclqtr46kv5pucivcndsnj
 const TWITCH_CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET || "1wwnttex8byncuvkte5ylsx8vkw3ra";
 const TWITCH_USERNAME = "zenyxxtw";
 const TWITCH_NOTIFY_CHANNEL_ID = "1548388049669455972"; // 📺・twitch
+const TWITCH_WEBHOOK_URL = "https://discord.com/api/webhooks/1548571591267459133/skEqb06FOW8rFqVF7L2N-VCL7Oyo74lqOnl8RWZXnLb5r7LVPSdxX5q36aiDZvHZ2mDC";
 const TWITCH_CHECK_INTERVAL_MS = 60 * 1000; // 1 minute
 
 let twitchAccessToken = null;
@@ -214,8 +216,51 @@ async function checkTwitchLive(guild) {
   });
 }
 
-// Envoyer la notification de live
+// Envoyer la notification de live via webhook
 async function sendTwitchLiveNotification(guild, stream) {
+  const twitchUrl = `https://www.twitch.tv/${TWITCH_USERNAME}`;
+
+  // Webhook avec le look "𝒁𝒆𝒏𝒚𝑿𝒙 Twitch"
+  if (TWITCH_WEBHOOK_URL) {
+    try {
+      const embed = {
+        title: "🔴 ZenyXx est EN LIVE !",
+        url: twitchUrl,
+        color: 9175039, // 0x9146FF
+        fields: [
+          { name: "🎬 Titre", value: stream.title || "Aucun titre", inline: false },
+          { name: "🎮 Jeu", value: stream.game_name || "Non spécifié", inline: true },
+          { name: "👥 Spectateurs", value: `${stream.viewer_count || 0}`, inline: true }
+        ],
+        thumbnail: { url: stream.thumbnail_url?.replace("{width}", "320").replace("{height}", "180") || "" },
+        timestamp: new Date().toISOString(),
+      };
+
+      const res = await fetch(TWITCH_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: "𝒁𝒆𝒏𝒚𝑿𝒙 Twitch",
+          avatar_url: "https://storage.googleapis.com/ot-pt/present_files/2026-09-13/anonymous/default/a4e6286be56b42539c518737910a648b_.png?Expires=1791870770&GoogleAccessId=gcs-owner%40oreateai-434511.iam.gserviceaccount.com&Signature=VAO%2B4lc1y5KgYSvT5kBpZs0kFRBZUhNcIIgvil5kSyL7W0s%2BrlKeCVvUFMMTpE3t9se08SYXUrKppSZtuolVxetifpne94W3OPRZxKCjxeti8xK2QmYtfa8WhCY16oNNFrKiOC8KgJ1MWMDdKFWnn4%2Bd%2BhydkNp%2Ff79icgnhadr7Eb6l21FYPyaj173zeGIRPeji4xVAkeRLpUVxUdSwOhbehHS6%2BySrVC53PBbNBAhpIRKy234pbmuGbpQ4wrXn1VZw9EM%2F50GheVSrRBSu4luEtFWEACMdsyEZDTYik0A7ij4tWD%2FvKA7B4ucohilvqvtFUnNUkDsn4VmVi25pIA%3D%3D",
+          content: `@everyone 🔴 **ZenyXx vient de lancer son live !** Viens le regarder !\n${twitchUrl}`,
+          embeds: [embed],
+        }),
+      });
+
+      if (res.ok) {
+        // Récupérer l'ID du message webhook pour pouvoir l'éditer plus tard
+        const data = await res.json();
+        twitchLiveMessageId = data.id;
+        console.log("[Twitch] 📢 Notification webhook envoyée !");
+        return;
+      }
+      console.error(`[Twitch] Webhook HTTP ${res.status} — fallback via bot`);
+    } catch (err) {
+      console.error(`[Twitch] Erreur webhook: ${err.message} — fallback via bot`);
+    }
+  }
+
+  // Fallback : envoyer via le bot
   const channel = guild.channels.cache.get(TWITCH_NOTIFY_CHANNEL_ID);
   if (!channel) {
     console.error("[Twitch] Salon de notification introuvable");
@@ -224,7 +269,7 @@ async function sendTwitchLiveNotification(guild, stream) {
 
   const embed = new EmbedBuilder()
     .setTitle("🔴 ZenyXx est EN LIVE !")
-    .setURL(`https://www.twitch.tv/${TWITCH_USERNAME}`)
+    .setURL(twitchUrl)
     .setColor(0x9146FF)
     .addFields(
       { name: "🎬 Titre", value: stream.title || "Aucun titre", inline: false },
@@ -235,7 +280,7 @@ async function sendTwitchLiveNotification(guild, stream) {
     .setTimestamp();
 
   const msg = await channel.send({
-    content: "@everyone 🔴 **ZenyXx vient de lancer son live !** Viens le regarder !\nhttps://www.twitch.tv/" + TWITCH_USERNAME,
+    content: "@everyone 🔴 **ZenyXx vient de lancer son live !** Viens le regarder !\n" + twitchUrl,
     embeds: [embed]
   }).catch(() => null);
 
@@ -260,37 +305,74 @@ async function twitchLiveLoop() {
         console.log("[Twitch] Le live est terminé");
         twitchWasLive = false;
 
-        // Mettre à jour le message de notification
-        if (twitchLiveMessageId) {
+        // Envoyer un nouveau message de fin via webhook
+        if (TWITCH_WEBHOOK_URL) {
+          try {
+            await fetch(TWITCH_WEBHOOK_URL, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                username: "𝒁𝒆𝒏𝒚𝑿𝒙 Twitch",
+                avatar_url: "https://storage.googleapis.com/ot-pt/present_files/2026-09-13/anonymous/default/a4e6286be56b42539c518737910a648b_.png?Expires=1791870770&GoogleAccessId=gcs-owner%40oreateai-434511.iam.gserviceaccount.com&Signature=VAO%2B4lc1y5KgYSvT5kBpZs0kFRBZUhNcIIgvil5kSyL7W0s%2BrlKeCVvUFMMTpE3t9se08SYXUrKppSZtuolVxetifpne94W3OPRZxKCjxeti8xK2QmYtfa8WhCY16oNNFrKiOC8KgJ1MWMDdKFWnn4%2Bd%2BhydkNp%2Ff79icgnhadr7Eb6l21FYPyaj173zeGIRPeji4xVAkeRLpUVxUdSwOhbehHS6%2BySrVC53PBbNBAhpIRKy234pbmuGbpQ4wrXn1VZw9EM%2F50GheVSrRBSu4luEtFWEACMdsyEZDTYik0A7ij4tWD%2FvKA7B4ucohilvqvtFUnNUkDsn4VmVi25pIA%3D%3D",
+                content: "⚫ **Le live de ZenyXx est terminé.** Merci d'avoir regardé !",
+              }),
+            });
+            console.log("[Twitch] 📢 Fin de live webhook envoyée");
+          } catch (err) {
+            console.error(`[Twitch] Erreur webhook fin: ${err.message}`);
+          }
+        } else {
+          // Fallback bot
           const channel = guild.channels.cache.get(TWITCH_NOTIFY_CHANNEL_ID);
           if (channel) {
-            const msg = await channel.messages.fetch(twitchLiveMessageId).catch(() => null);
-            if (msg) {
-              const updatedEmbed = EmbedBuilder.from(msg.embeds[0])
-                .setTitle("⚫ Le live est terminé")
-                .setColor(0x4F545C);
-              await msg.edit({
-                content: "~~@everyone~~ ⚫ **Le live de ZenyXx est terminé.** Merci d'avoir regardé !",
-                embeds: [updatedEmbed]
-              }).catch(() => {});
-            }
+            await channel.send("⚫ **Le live de ZenyXx est terminé.** Merci d'avoir regardé !").catch(() => {});
           }
-          twitchLiveMessageId = null;
         }
+        twitchLiveMessageId = null;
       }
-      // Si le live continue, on met à jour le nombre de spectateurs
+      // Si le live continue, on met à jour le nombre de spectateurs via webhook
       if (stream && twitchWasLive && twitchLiveMessageId) {
-        const channel = guild.channels.cache.get(TWITCH_NOTIFY_CHANNEL_ID);
-        if (channel) {
-          const msg = await channel.messages.fetch(twitchLiveMessageId).catch(() => null);
-          if (msg && msg.embeds[0]) {
-            const updatedEmbed = EmbedBuilder.from(msg.embeds[0])
-              .setFields(
+        if (TWITCH_WEBHOOK_URL) {
+          try {
+            const embed = {
+              title: "🔴 ZenyXx est EN LIVE !",
+              url: `https://www.twitch.tv/${TWITCH_USERNAME}`,
+              color: 9175039,
+              fields: [
                 { name: "🎬 Titre", value: stream.title || "Aucun titre", inline: false },
                 { name: "🎮 Jeu", value: stream.game_name || "Non spécifié", inline: true },
                 { name: "👥 Spectateurs", value: `${stream.viewer_count || 0}`, inline: true }
-              );
-            await msg.edit({ embeds: [updatedEmbed] }).catch(() => {});
+              ],
+              thumbnail: { url: stream.thumbnail_url?.replace("{width}", "320").replace("{height}", "180") || "" },
+              timestamp: new Date().toISOString(),
+            };
+
+            // Éditer le message webhook
+            const editUrl = `${TWITCH_WEBHOOK_URL}/messages/${twitchLiveMessageId}`;
+            await fetch(editUrl, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                embeds: [embed],
+              }),
+            });
+          } catch (err) {
+            // L'édition peut échouer, c'est pas grave
+          }
+        } else {
+          // Fallback bot
+          const channel = guild.channels.cache.get(TWITCH_NOTIFY_CHANNEL_ID);
+          if (channel) {
+            const msg = await channel.messages.fetch(twitchLiveMessageId).catch(() => null);
+            if (msg && msg.embeds[0]) {
+              const updatedEmbed = EmbedBuilder.from(msg.embeds[0])
+                .setFields(
+                  { name: "🎬 Titre", value: stream.title || "Aucun titre", inline: false },
+                  { name: "🎮 Jeu", value: stream.game_name || "Non spécifié", inline: true },
+                  { name: "👥 Spectateurs", value: `${stream.viewer_count || 0}`, inline: true }
+                );
+              await msg.edit({ embeds: [updatedEmbed] }).catch(() => {});
+            }
           }
         }
       }
