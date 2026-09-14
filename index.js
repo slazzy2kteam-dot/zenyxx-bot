@@ -1251,15 +1251,21 @@ async function sendLog(
   color = 0x5865F2,
   channelId = null
 ) {
-  const channel =
-    channelId
-      ? guild.channels.cache.get(channelId)
-      : getLogChannel(
-          guild,
-          channelName
-        );
+  let channel;
+  try {
+    channel =
+      channelId
+        ? guild.channels.cache.get(channelId) || await guild.channels.fetch(channelId).catch(() => null)
+        : getLogChannel(
+            guild,
+            channelName
+          );
+  } catch (err) {
+    console.error("[sendLog] Erreur récupération salon:", err.message);
+  }
 
   if (!channel) {
+    console.warn(`[sendLog] ⚠️ Salon introuvable (channelId=${channelId}, channelName=${channelName}) — guild ${guild.id}`);
     return;
   }
 
@@ -1291,7 +1297,7 @@ async function sendLog(
 
   await channel.send({
     embeds: [embed]
-  }).catch(() => {});
+  }).catch(err => console.error("[sendLog] ❌ Erreur envoi:", err.message, "| salon:", channel.id));
 }
 
 
@@ -9270,6 +9276,8 @@ client.on(
   "webhookCreate",
   async webhook => {
 
+    console.log(`[webhookCreate] 🔔 Event déclenché — webhook: ${webhook.id} "${webhook.name}" dans guild: ${webhook.guild?.id ?? "DM"}`);
+
     if (!webhook.guild) return;
 
     let executor = null;
@@ -9335,6 +9343,8 @@ client.on(
   "webhookDelete",
   async webhook => {
 
+    console.log(`[webhookDelete] 🔔 Event déclenché — webhook: ${webhook.id} dans guild: ${webhook.guild?.id ?? "DM"}`);
+
     if (!webhook.guild) return;
 
     let executor = null;
@@ -9394,6 +9404,8 @@ client.on(
 client.on(
   "webhookUpdate",
   async (oldWebhook, newWebhook) => {
+
+    console.log(`[webhookUpdate] 🔔 Event déclenché — webhook: ${newWebhook.id} dans guild: ${newWebhook.guild?.id ?? "DM"}`);
 
     if (!newWebhook.guild) return;
 
