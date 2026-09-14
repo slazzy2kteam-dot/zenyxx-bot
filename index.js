@@ -3598,6 +3598,33 @@ client.once(
       `✅ ${client.user.tag} est connecté !`
     );
 
+    // ====== DIAGNOSTIC WEBHOOK LOG ======
+    console.log("\n====== 🔍 DIAGNOSTIC WEBHOOK LOG ======");
+    for (const guild of client.guilds.cache.values()) {
+      console.log(`Guild: ${guild.name} (${guild.id})`);
+
+      // Vérifier permissions du bot sur le salon admin
+      const adminChannel = guild.channels.cache.get(ADMIN_LOG_CHANNEL_ID) || await guild.channels.fetch(ADMIN_LOG_CHANNEL_ID).catch(() => null);
+      if (!adminChannel) {
+        console.error(`  ❌ Salon admin ${ADMIN_LOG_CHANNEL_ID} INTROUVABLE — le bot n'a probablement pas ViewChannel sur 🚫-logs-admin`);
+      } else {
+        const botMember = await guild.members.fetchMe().catch(() => null);
+        if (botMember) {
+          const perms = adminChannel.permissionsFor(botMember);
+          console.log(`  📋 Salon admin trouvé: #${adminChannel.name} (${adminChannel.id})`);
+          console.log(`  📋 ViewChannel: ${perms?.has("ViewChannel") ? "✅" : "❌"}`);
+          console.log(`  📋 SendMessages: ${perms?.has("SendMessages") ? "✅" : "❌"}`);
+          console.log(`  📋 EmbedLinks: ${perms?.has("EmbedLinks") ? "✅" : "❌"}`);
+          console.log(`  📋 ManageWebhooks: ${perms?.has("ManageWebhooks") ? "✅" : "❌"}`);
+        }
+      }
+
+      // Vérifier intents actifs
+      console.log(`  📋 Intents configurés: ${client.options.intents.toArray().join(", ")}`);
+      console.log(`  📋 GuildWebhooks intent: ${client.options.intents.has(GatewayIntentBits.GuildWebhooks) ? "✅" : "❌"}`);
+    }
+    console.log("====== FIN DIAGNOSTIC ======\n");
+
     try {
 
       // Supprimer les commandes globales orphelines (cause de doublons)
