@@ -9316,7 +9316,19 @@ client.on(
 
     console.log(`[webhookAudit] 🔔 Audit webhook détecté — action: ${auditLogEntry.action} dans guild: ${guild.id}`);
 
-    const executor = auditLogEntry.executor || null;
+    // Récupérer l'exécuteur — en v15, l'audit log gateway envoie souvent
+    // un PartialUser (juste l'ID), donc on fetch l'utilisateur complet
+    let executor = null;
+    const executorId = auditLogEntry.executorId;
+    if (executorId) {
+      try {
+        const user = await client.users.fetch(executorId).catch(() => null);
+        executor = user ? `${user}` : `<@${executorId}>`;
+      } catch {
+        executor = `<@${executorId}>`;
+      }
+    }
+
     const targetId = auditLogEntry.targetId || "Inconnu";
     const targetName = auditLogEntry.changes?.find(c => c.key === "name")?.new || auditLogEntry.changes?.find(c => c.key === "name")?.old || `\`${targetId}\``;
     const targetChannel = auditLogEntry.changes?.find(c => c.key === "channel_id")?.new || auditLogEntry.changes?.find(c => c.key === "channel_id")?.old || null;
