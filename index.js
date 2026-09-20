@@ -229,8 +229,75 @@ let twitchUserAccessToken = null;
 let twitchUserRefreshToken = null;
 let twitchUserTokenExpiry = 0;
 
-function loadTwitchUserTokens() {
-  // 1. Essayer le fichier local
+// ======================================================
+// STOCKAGE PERSISTANT DU TOKEN VIA UPSTASH REDIS
+// Render efface le disque à chaque redéploiement/veille, donc on
+// stocke le token Twitch rafraîchi dans Upstash pour qu'il survive.
+// Variables d'env nécessaires :
+//   UPSTASH_REDIS_REST_URL   — ex: https://xxxx.upstash.io
+//   UPSTASH_REDIS_REST_TOKEN — le token REST fourni par Upstash
+// ======================================================
+const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL || "";
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || "";
+const UPSTASH_KEY = "twitch_user_tokens";
+
+function upstashEnabled() {
+  return !!(UPSTASH_URL && UPSTASH_TOKEN);
+}
+
+// Lire la valeur stockée dans Upstash (renvoie l'objet token ou null)
+async function upstashGetTokens() {
+  if (!upstashEnabled()) return null;
+  try {
+    const res = await fetch(UPSTASH_URL + "/get/" + encodeURIComponent(UPSTASH_KEY), {
+      headers: { Authorization: "Bearer " + UPSTASH_TOKEN }
+    });
+    const json = await res.json();
+    if (json && json.result) {
+      return JSON.parse(json.result);
+    }
+    return null;
+  } catch (e) {
+    console.error("[Upstash] Erreur lecture:", e.message);
+    return null;
+  }
+}
+
+// Écrire la valeur dans Upstash
+async function upstashSetTokens(obj) {
+  if (!upstashEnabled()) return false;
+  try {
+    const value = encodeURIComponent(JSON.stringify(obj));
+    const res = await fetch(UPSTASH_URL + "/set/" + encodeURIComponent(UPSTASH_KEY) + "/" + value, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + UPSTASH_TOKEN }
+    });
+    const json = await res.json();
+    if (json && json.result === "OK") {
+      console.log("[Upstash] ✅ Token sauvegardé dans Upstash (persistant)");
+      return true;
+    }
+    console.error("[Upstash] Réponse inattendue:", JSON.stringify(json));
+    return false;
+  } catch (e) {
+    console.error("[Upstash] Erreur écriture:", e.message);
+    return false;
+  }
+}
+
+async function loadTwitchUserTokens() {
+  // 1. PRIORITÉ : Upstash Redis (persistant, survit aux redémarrages Render)
+  if (upstashEnabled()) {
+    const stored = await upstashGetTokens();
+    if (stored && stored.access_token && stored.refresh_token) {
+      twitchUserAccessToken = stored.access_token;
+      twitchUserRefreshToken = stored.refresh_token;
+      twitchUserTokenExpiry = stored.expiry || 0;
+      console.log("[Twitch User] ✅ Token chargé depuis Upstash (persistant)");
+      return;
+    }
+  }
+  // 2. Essayer le fichier local
   try {
     if (fs.existsSync(TWITCH_USER_TOKENS_FILE)) {
       const data = JSON.parse(fs.readFileSync(TWITCH_USER_TOKENS_FILE, "utf8"));
@@ -239,18 +306,26 @@ function loadTwitchUserTokens() {
         twitchUserRefreshToken = data.refresh_token;
         twitchUserTokenExpiry = data.expiry || 0;
         console.log("[Twitch User] ✅ Token chargé depuis le fichier");
+        // Recopier dans Upstash pour la prochaine fois
+        if (upstashEnabled()) {
+          upstashSetTokens({ access_token: data.access_token, refresh_token: data.refresh_token, expiry: twitchUserTokenExpiry });
+        }
         return;
       }
     }
   } catch (e) {
     console.error("[Twitch User] Erreur lecture fichier token:", e.message);
   }
-  // 2. Fallback : variables d'environnement (persistant sur Render)
+  // 3. Fallback : variables d'environnement (utile au tout premier démarrage)
   if (process.env.TWITCH_USER_ACCESS_TOKEN && process.env.TWITCH_USER_REFRESH_TOKEN) {
     twitchUserAccessToken = process.env.TWITCH_USER_ACCESS_TOKEN;
     twitchUserRefreshToken = process.env.TWITCH_USER_REFRESH_TOKEN;
     twitchUserTokenExpiry = parseInt(process.env.TWITCH_USER_TOKEN_EXPIRY || "0", 10);
     console.log("[Twitch User] ✅ Token chargé depuis les variables d'environnement");
+    // Recopier dans Upstash pour que les futurs refresh soient persistés
+    if (upstashEnabled()) {
+      upstashSetTokens({ access_token: twitchUserAccessToken, refresh_token: twitchUserRefreshToken, expiry: twitchUserTokenExpiry });
+    }
     return;
   }
   console.warn("[Twitch User] ⚠️ Aucun token utilisateur trouvé. Le compteur d'abonnés Twitch ne fonctionnera pas. Utilise /twitch-auth pour autoriser.");
@@ -260,22 +335,24 @@ function saveTwitchUserTokens(accessToken, refreshToken, expiresIn) {
   twitchUserAccessToken = accessToken;
   twitchUserRefreshToken = refreshToken;
   twitchUserTokenExpiry = Date.now() + (expiresIn - 60) * 1000;
-  // Sauvegarder dans le fichier
+  const payload = {
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    expiry: twitchUserTokenExpiry
+  };
+  // 1. PRIORITÉ : sauvegarder dans Upstash (persistant sur Render)
+  if (upstashEnabled()) {
+    upstashSetTokens(payload);
+  } else {
+    console.warn("[Upstash] ⚠️ Upstash non configuré — le token ne survivra PAS aux redémarrages. Configure UPSTASH_REDIS_REST_URL et UPSTASH_REDIS_REST_TOKEN.");
+  }
+  // 2. Sauvegarder aussi dans le fichier (backup local)
   try {
-    fs.writeFileSync(TWITCH_USER_TOKENS_FILE, JSON.stringify({
-      access_token: accessToken,
-      refresh_token: refreshToken,
-      expiry: twitchUserTokenExpiry
-    }, null, 2));
+    fs.writeFileSync(TWITCH_USER_TOKENS_FILE, JSON.stringify(payload, null, 2));
     console.log("[Twitch User] ✅ Token sauvegardé dans le fichier");
   } catch (e) {
     console.error("[Twitch User] Erreur sauvegarde fichier token:", e.message);
   }
-  // Loguer les valeurs pour les copier dans les env vars de Render
-  console.log("[Twitch User] ⚠️ AJOUTE DANS LES ENV VARS DE RENDER :");
-  console.log("[Twitch User]   TWITCH_USER_ACCESS_TOKEN=" + accessToken);
-  console.log("[Twitch User]   TWITCH_USER_REFRESH_TOKEN=" + refreshToken);
-  console.log("[Twitch User]   TWITCH_USER_TOKEN_EXPIRY=" + twitchUserTokenExpiry);
 }
 
 async function refreshTwitchUserToken() {
@@ -313,7 +390,7 @@ async function refreshTwitchUserToken() {
 async function getValidTwitchUserToken() {
   // 1. Si pas de token du tout, essayer de charger
   if (!twitchUserAccessToken) {
-    loadTwitchUserTokens();
+    await loadTwitchUserTokens();
     if (!twitchUserAccessToken) {
       console.warn("[Twitch User] ⚠️ Aucun token utilisateur. Fais /twitch-auth d'abord.");
       return null;
@@ -3656,7 +3733,7 @@ client.once(
       );
 
       // Démarrer les compteurs de membres / abonnés
-      loadTwitchUserTokens(); // Charger le token utilisateur Twitch pour le compteur d'abonnés
+      await loadTwitchUserTokens(); // Charger le token utilisateur Twitch pour le compteur d'abonnés
       startCounterInterval();
       console.log(
         "✅ Compteurs de membres / abonnés démarrés !"
