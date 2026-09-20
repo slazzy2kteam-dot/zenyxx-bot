@@ -393,7 +393,8 @@ function sendNotifications(videos) {
 
     if (DISCORD_WEBHOOK) {
       var body = JSON.stringify({
-        content: '🎬 **Nouveau TikTok** de @' + TIKTOK_USER + ' !',
+        content: '@everyone \ud83c\udfac **Nouveau TikTok** de @' + TIKTOK_USER + ' ! Va le regarder \ud83d\udd25',
+        allowed_mentions: { parse: ['everyone'] },
         embeds: [{
           title: video.desc || 'Nouveau TikTok',
           url: videoUrl,
@@ -435,17 +436,21 @@ function sendViaChannel(video, videoUrl) {
   return discordClient.channels.fetch(CHANNEL_ID).then(function (channel) {
     if (!channel) return;
     var embed = new EmbedBuilder()
-      .setTitle(video.desc || '🎬 Nouveau TikTok !')
+      .setTitle(video.desc || '\ud83c\udfac Nouveau TikTok !')
       .setURL(videoUrl)
       .setColor(0xFF0050)
       .setDescription(
         '@' + TIKTOK_USER + ' vient de poster un nouveau TikTok !\n\n' +
-        '🔗 [Regarder le TikTok](' + videoUrl + ')'
+        '\ud83d\udd17 [Regarder le TikTok](' + videoUrl + ')'
       )
       .setFooter({ text: 'TikTok Monitor ' + VERSION })
       .setTimestamp();
 
-    return channel.send({ embeds: [embed] });
+    return channel.send({
+      content: '@everyone \ud83c\udfac **Nouveau TikTok** de @' + TIKTOK_USER + ' ! Va le regarder \ud83d\udd25',
+      embeds: [embed],
+      allowedMentions: { parse: ['everyone'] },
+    });
   }).then(function () {
     console.log('[Discord] Notification envoyee dans le channel');
   }).catch(function (e) {
