@@ -4362,8 +4362,93 @@ client.on(
             }
           );
 
+        // Envoi du message privé (MP) au membre averti
+        let dmSent = true;
+
+        try {
+
+          const dmEmbed =
+            new EmbedBuilder()
+
+              .setTitle(
+                "⚠️ Tu as reçu un avertissement"
+              )
+
+              .setColor(
+                0xFEE75C
+              )
+
+              .setDescription(
+                `Tu as reçu un avertissement sur le serveur **${guild.name}**.`
+              )
+
+              .addFields(
+
+                {
+                  name:
+                    "📝 Raison",
+
+                  value:
+                    cleanText(
+                      reason
+                    ),
+
+                  inline:
+                    false
+                },
+
+                {
+                  name:
+                    "🔢 Nombre de warns",
+
+                  value:
+                    `${warningsBefore + 1}`,
+
+                  inline:
+                    true
+                }
+              )
+
+              .setFooter({
+                text:
+                  `Case #${caseNumber}`
+              })
+
+              .setTimestamp();
+
+          if (proof) {
+
+            dmEmbed.addFields({
+              name:
+                "📎 Preuves",
+
+              value:
+                `[Voir la preuve](${proof.url})`,
+
+              inline:
+                false
+            });
+          }
+
+          await target.send({
+            embeds:
+              [dmEmbed]
+          });
+
+        } catch (err) {
+
+          dmSent = false;
+
+          console.warn(
+            `[warn] ⚠️ Impossible d'envoyer un MP à ${target.tag} (${target.id}) : ${err?.message ?? err}`
+          );
+        }
+
         await interaction.reply(
-          `⚠️ **${target.tag}** a reçu un avertissement. (Warn #${warningsBefore + 1})`
+          `⚠️ **${target.tag}** a reçu un avertissement. (Warn #${warningsBefore + 1})` +
+          (dmSent
+            ? ""
+            : "\n⚠️ *Le membre n'a pas pu être prévenu en MP (messages privés fermés).*")
         );
 
         const channel =
