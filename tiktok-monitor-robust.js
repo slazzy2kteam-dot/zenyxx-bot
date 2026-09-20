@@ -30,6 +30,7 @@ const {
 
 // === CONFIG ===
 var TIKTOK_USER = process.env.TIKTOK_USER || 'aetherofficiel';
+var DISPLAY_NAME = process.env.TIKTOK_DISPLAY_NAME || 'ZenyXx';
 var DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK || '';
 var CHECK_INTERVAL = parseInt(process.env.CHECK_INTERVAL) || 300000;
 var CHANNEL_ID = process.env.CHANNEL_ID || '1548231185015120054';
@@ -61,6 +62,34 @@ function pickCoverUrl(video) {
     video.image ||
     null
   );
+}
+
+// Récupère la miniature via l'API officielle oEmbed de TikTok.
+// Fiable car c'est une API publique documentée (pas du scraping),
+// utilisée en complément/fallback quand la source principale
+// (Worker, Microlink, Slarker) ne fournit pas d'image.
+function fetchThumbnailViaOEmbed(videoUrl) {
+  var url = 'https://www.tiktok.com/oembed?url=' + encodeURIComponent(videoUrl);
+  return fetchWithTimeout(url, {}, 15000)
+    .then(function (resp) {
+      if (!resp.ok) return null;
+      return resp.json();
+    })
+    .then(function (data) {
+      return (data && data.thumbnail_url) || null;
+    })
+    .catch(function (e) {
+      console.log('[oEmbed] Echec : ' + e.message);
+      return null;
+    });
+}
+
+// Combine les deux : essaie d'abord ce que la source a fourni,
+// sinon retombe sur oEmbed.
+function resolveCoverUrl(video, videoUrl) {
+  var direct = pickCoverUrl(video);
+  if (direct) return Promise.resolve(direct);
+  return fetchThumbnailViaOEmbed(videoUrl);
 }
 
 function fetchWithTimeout(url, options, timeoutMs) {
@@ -409,59 +438,61 @@ function checkForNewVideos() {
 function sendNotifications(videos) {
   var promises = videos.map(function (video) {
     var videoUrl = 'https://www.tiktok.com/@' + TIKTOK_USER + '/video/' + video.id;
-    var coverUrl = pickCoverUrl(video);
 
-    var watchButtonRow = [
-      {
-        type: 1,
-        components: [
-          {
-            type: 2,
-            style: 5, // Link
-            label: 'Regarder la vidéo',
-            url: videoUrl,
-          },
-        ],
-      },
-    ];
+    return resolveCoverUrl(video, videoUrl).then(function (coverUrl) {
+      var watchButtonRow = [
+        {
+          type: 1,
+          components: [
+            {
+              type: 2,
+              style: 5, // Link
+              label: 'Regarder la vidéo',
+              url: videoUrl,
+            },
+          ],
+        },
+      ];
 
-    if (DISCORD_WEBHOOK) {
-      var embedPayload = {
-        title: video.desc || 'Nouveau TikTok',
-        url: videoUrl,
-        color: 0xFF0050,
-        footer: { text: 'TikTok Monitor ' + VERSION },
-        timestamp: new Date().toISOString(),
-      };
-      if (coverUrl) {
-        embedPayload.image = { url: coverUrl };
+      if (DISCORD_WEBHOOK) {
+        var embedPayload = {
+          title: '🎬 Nouveau TikTok !',
+          description: '**' + DISPLAY_NAME + '** vient de poster un nouveau TikTok à regarder dès maintenant !',
+          url: videoUrl,
+          color: 0xFF0050,
+          footer: { text: 'TikTok Monitor ' + VERSION },
+          timestamp: new Date().toISOString(),
+        };
+        if (coverUrl) {
+          embedPayload.image = { url: coverUrl };
+        }
+
+        var body = JSON.stringify({
+          content: '@everyone \ud83c\udfac **Nouveau TikTok !** ' + DISPLAY_NAME + ' vient de poster \ud83d\udd25',
+          allowed_mentions: { parse: ['everyone'] },
+          embeds: [embedPayload],
+          components: watchButtonRow,
+        });
+
+        return fetch(DISCORD_WEBHOOK, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: body,
+        }).then(function (resp) {
+          if (resp.ok) {
+            console.log('[Discord] Notification envoyee via webhook');
+            return;
+          }
+          console.log('[Discord] Webhook HTTP ' + resp.status + ', tentative via channel');
+          return sendViaChannel(video, videoUrl, coverUrl);
+        }).catch(function (e) {
+          console.log('[Discord] Webhook echoue : ' + e.message + ', tentative via channel');
+          return sendViaChannel(video, videoUrl, coverUrl);
+        });
       }
 
-      var body = JSON.stringify({
-        content: '@everyone \ud83c\udfac **Nouveau TikTok** de @' + TIKTOK_USER + ' ! Va le regarder \ud83d\udd25',
-        allowed_mentions: { parse: ['everyone'] },
-        embeds: [embedPayload],
-        components: watchButtonRow,
-      });
-
-      return fetch(DISCORD_WEBHOOK, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: body,
-      }).then(function (resp) {
-        if (resp.ok) {
-          console.log('[Discord] Notification envoyee via webhook');
-          return;
-        }
-        console.log('[Discord] Webhook HTTP ' + resp.status + ', tentative via channel');
-        return sendViaChannel(video, videoUrl, coverUrl);
-      }).catch(function (e) {
-        console.log('[Discord] Webhook echoue : ' + e.message + ', tentative via channel');
-        return sendViaChannel(video, videoUrl, coverUrl);
-      });
-    }
-
-    return sendViaChannel(video, videoUrl, coverUrl);
+      return sendViaChannel(video, videoUrl, coverUrl);
+    });
   });
 
   return Promise.all(promises);
@@ -476,11 +507,11 @@ function sendViaChannel(video, videoUrl, coverUrl) {
   return discordClient.channels.fetch(CHANNEL_ID).then(function (channel) {
     if (!channel) return;
     var embed = new EmbedBuilder()
-      .setTitle(video.desc || '\ud83c\udfac Nouveau TikTok !')
+      .setTitle('\ud83c\udfac Nouveau TikTok !')
       .setURL(videoUrl)
       .setColor(0xFF0050)
       .setDescription(
-        '@' + TIKTOK_USER + ' vient de poster un nouveau TikTok !'
+        '**' + DISPLAY_NAME + '** vient de poster un nouveau TikTok à regarder dès maintenant !'
       )
       .setFooter({ text: 'TikTok Monitor ' + VERSION })
       .setTimestamp();
@@ -497,7 +528,7 @@ function sendViaChannel(video, videoUrl, coverUrl) {
     var row = new ActionRowBuilder().addComponents(watchButton);
 
     return channel.send({
-      content: '@everyone \ud83c\udfac **Nouveau TikTok** de @' + TIKTOK_USER + ' ! Va le regarder \ud83d\udd25',
+      content: '@everyone \ud83c\udfac **Nouveau TikTok !** ' + DISPLAY_NAME + ' vient de poster \ud83d\udd25',
       embeds: [embed],
       components: [row],
       allowedMentions: { parse: ['everyone'] },
@@ -522,55 +553,57 @@ function sendTestNotification() {
 
     var video = data.videos[0];
     var videoUrl = 'https://www.tiktok.com/@' + TIKTOK_USER + '/video/' + video.id;
-    var coverUrl = pickCoverUrl(video);
 
-    var watchButtonRow = [
-      {
-        type: 1,
-        components: [
-          {
-            type: 2,
-            style: 5,
-            label: 'Regarder la vidéo',
-            url: videoUrl,
-          },
-        ],
-      },
-    ];
+    return resolveCoverUrl(video, videoUrl).then(function (coverUrl) {
+      var watchButtonRow = [
+        {
+          type: 1,
+          components: [
+            {
+              type: 2,
+              style: 5,
+              label: 'Regarder la vidéo',
+              url: videoUrl,
+            },
+          ],
+        },
+      ];
 
-    if (DISCORD_WEBHOOK) {
-      var embedPayload = {
-        title: video.desc || 'Nouveau TikTok',
-        url: videoUrl,
-        color: 0xFF0050,
-        footer: { text: 'TikTok Monitor ' + VERSION + ' — Test' },
-        timestamp: new Date().toISOString(),
-      };
-      if (coverUrl) {
-        embedPayload.image = { url: coverUrl };
+      if (DISCORD_WEBHOOK) {
+        var embedPayload = {
+          title: '🎬 Nouveau TikTok !',
+          description: '**' + DISPLAY_NAME + '** vient de poster un nouveau TikTok à regarder dès maintenant !',
+          url: videoUrl,
+          color: 0xFF0050,
+          footer: { text: 'TikTok Monitor ' + VERSION + ' — Test' },
+          timestamp: new Date().toISOString(),
+        };
+        if (coverUrl) {
+          embedPayload.image = { url: coverUrl };
+        }
+
+        var body = JSON.stringify({
+          content: '\ud83e\uddea **Aper\u00e7u de notification TikTok** (test manuel, pas une vraie nouvelle vid\u00e9o)',
+          embeds: [embedPayload],
+          components: watchButtonRow,
+        });
+
+        return fetch(DISCORD_WEBHOOK, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: body,
+        }).then(function (resp) {
+          if (resp.ok) {
+            return { success: true, message: 'Aper\u00e7u envoy\u00e9 via webhook.' };
+          }
+          return sendTestViaChannel(video, videoUrl, coverUrl);
+        }).catch(function () {
+          return sendTestViaChannel(video, videoUrl, coverUrl);
+        });
       }
 
-      var body = JSON.stringify({
-        content: '\ud83e\uddea **Aper\u00e7u de notification TikTok** (test manuel, pas une vraie nouvelle vid\u00e9o)',
-        embeds: [embedPayload],
-        components: watchButtonRow,
-      });
-
-      return fetch(DISCORD_WEBHOOK, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: body,
-      }).then(function (resp) {
-        if (resp.ok) {
-          return { success: true, message: 'Aper\u00e7u envoy\u00e9 via webhook.' };
-        }
-        return sendTestViaChannel(video, videoUrl, coverUrl);
-      }).catch(function () {
-        return sendTestViaChannel(video, videoUrl, coverUrl);
-      });
-    }
-
-    return sendTestViaChannel(video, videoUrl, coverUrl);
+      return sendTestViaChannel(video, videoUrl, coverUrl);
+    });
   }).catch(function (e) {
     return { success: false, message: 'Erreur : ' + e.message };
   });
@@ -584,10 +617,10 @@ function sendTestViaChannel(video, videoUrl, coverUrl) {
     if (!channel) return { success: false, message: 'Salon introuvable — ID: ' + CHANNEL_ID };
 
     var embed = new EmbedBuilder()
-      .setTitle(video.desc || '\ud83c\udfac Nouveau TikTok !')
+      .setTitle('\ud83c\udfac Nouveau TikTok !')
       .setURL(videoUrl)
       .setColor(0xFF0050)
-      .setDescription('@' + TIKTOK_USER + ' vient de poster un nouveau TikTok !')
+      .setDescription('**' + DISPLAY_NAME + '** vient de poster un nouveau TikTok à regarder dès maintenant !')
       .setFooter({ text: 'TikTok Monitor ' + VERSION + ' — Test' })
       .setTimestamp();
 
