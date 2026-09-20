@@ -151,7 +151,7 @@ const CASE_FILE = "./cases.json";
 const MAX_EMBED_FIELD = 1024;
 
 const httpsModule = require("https");
-const { startTikTokMonitor, checkFollowers } = require("./tiktok-monitor-robust");
+const { startTikTokMonitor, checkFollowers, sendTestNotification } = require("./tiktok-monitor-robust");
 
 // ======================================================
 // SYSTÈME NOTIFICATION TWITCH LIVE
@@ -3655,6 +3655,21 @@ const commands = [
 
     .setDefaultMemberPermissions(
       PermissionFlagsBits.Administrator
+    ),
+
+  // TEST TIKTOK
+  new SlashCommandBuilder()
+
+    .setName(
+      "test-tiktok"
+    )
+
+    .setDescription(
+      "Envoie un aperçu de la notification TikTok (test, sans @everyone)"
+    )
+
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.Administrator
     )
 
 ].map(
@@ -5202,6 +5217,33 @@ client.on(
 
           ephemeral:
             true
+        });
+
+        return;
+      }
+
+      // ================================================
+      // TEST TIKTOK
+      // ================================================
+
+      if (
+        commandName ===
+        "test-tiktok"
+      ) {
+
+        await interaction.deferReply({
+          ephemeral:
+            true
+        });
+
+        const result =
+          await sendTestNotification();
+
+        await interaction.editReply({
+          content:
+            result.success
+              ? `✅ ${result.message}`
+              : `❌ ${result.message}`
         });
 
         return;
