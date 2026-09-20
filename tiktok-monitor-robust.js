@@ -21,7 +21,12 @@
 //   CHANNEL_ID      — ID du channel Discord pour les notifs de nouvelles videos
 // ============================================================
 
-const { EmbedBuilder } = require('discord.js');
+const {
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+} = require('discord.js');
 
 // === CONFIG ===
 var TIKTOK_USER = process.env.TIKTOK_USER || 'aetherofficiel';
@@ -42,6 +47,20 @@ var discordClient = null; // injecte via startTikTokMonitor(client)
 // ============================================================
 function sleep(ms) {
   return new Promise(function (r) { setTimeout(r, ms); });
+}
+
+// Essaie plusieurs noms de champs courants pour la miniature,
+// car le format exact dépend de ce que renvoie le Cloudflare Worker.
+function pickCoverUrl(video) {
+  return (
+    video.cover ||
+    video.coverUrl ||
+    video.thumbnail ||
+    video.thumbnailUrl ||
+    video.thumb ||
+    video.image ||
+    null
+  );
 }
 
 function fetchWithTimeout(url, options, timeoutMs) {
@@ -390,18 +409,39 @@ function checkForNewVideos() {
 function sendNotifications(videos) {
   var promises = videos.map(function (video) {
     var videoUrl = 'https://www.tiktok.com/@' + TIKTOK_USER + '/video/' + video.id;
+    var coverUrl = pickCoverUrl(video);
+
+    var watchButtonRow = [
+      {
+        type: 1,
+        components: [
+          {
+            type: 2,
+            style: 5, // Link
+            label: 'Regarder la vidéo',
+            url: videoUrl,
+          },
+        ],
+      },
+    ];
 
     if (DISCORD_WEBHOOK) {
+      var embedPayload = {
+        title: video.desc || 'Nouveau TikTok',
+        url: videoUrl,
+        color: 0xFF0050,
+        footer: { text: 'TikTok Monitor ' + VERSION },
+        timestamp: new Date().toISOString(),
+      };
+      if (coverUrl) {
+        embedPayload.image = { url: coverUrl };
+      }
+
       var body = JSON.stringify({
         content: '@everyone \ud83c\udfac **Nouveau TikTok** de @' + TIKTOK_USER + ' ! Va le regarder \ud83d\udd25',
         allowed_mentions: { parse: ['everyone'] },
-        embeds: [{
-          title: video.desc || 'Nouveau TikTok',
-          url: videoUrl,
-          color: 0xFF0050,
-          footer: { text: 'TikTok Monitor ' + VERSION },
-          timestamp: new Date().toISOString(),
-        }],
+        embeds: [embedPayload],
+        components: watchButtonRow,
       });
 
       return fetch(DISCORD_WEBHOOK, {
@@ -414,20 +454,20 @@ function sendNotifications(videos) {
           return;
         }
         console.log('[Discord] Webhook HTTP ' + resp.status + ', tentative via channel');
-        return sendViaChannel(video, videoUrl);
+        return sendViaChannel(video, videoUrl, coverUrl);
       }).catch(function (e) {
         console.log('[Discord] Webhook echoue : ' + e.message + ', tentative via channel');
-        return sendViaChannel(video, videoUrl);
+        return sendViaChannel(video, videoUrl, coverUrl);
       });
     }
 
-    return sendViaChannel(video, videoUrl);
+    return sendViaChannel(video, videoUrl, coverUrl);
   });
 
   return Promise.all(promises);
 }
 
-function sendViaChannel(video, videoUrl) {
+function sendViaChannel(video, videoUrl, coverUrl) {
   if (!discordClient) {
     console.log('[Discord] Pas de client Discord disponible (startTikTokMonitor non appele avec le client)');
     return Promise.resolve();
@@ -440,21 +480,137 @@ function sendViaChannel(video, videoUrl) {
       .setURL(videoUrl)
       .setColor(0xFF0050)
       .setDescription(
-        '@' + TIKTOK_USER + ' vient de poster un nouveau TikTok !\n\n' +
-        '\ud83d\udd17 [Regarder le TikTok](' + videoUrl + ')'
+        '@' + TIKTOK_USER + ' vient de poster un nouveau TikTok !'
       )
       .setFooter({ text: 'TikTok Monitor ' + VERSION })
       .setTimestamp();
 
+    if (coverUrl) {
+      embed.setImage(coverUrl);
+    }
+
+    var watchButton = new ButtonBuilder()
+      .setLabel('Regarder la vidéo')
+      .setStyle(ButtonStyle.Link)
+      .setURL(videoUrl);
+
+    var row = new ActionRowBuilder().addComponents(watchButton);
+
     return channel.send({
       content: '@everyone \ud83c\udfac **Nouveau TikTok** de @' + TIKTOK_USER + ' ! Va le regarder \ud83d\udd25',
       embeds: [embed],
+      components: [row],
       allowedMentions: { parse: ['everyone'] },
     });
   }).then(function () {
     console.log('[Discord] Notification envoyee dans le channel');
   }).catch(function (e) {
     console.log('[Discord] Channel echoue : ' + e.message);
+  });
+}
+
+// ============================================================
+// TEST MANUEL — appelée par une commande slash pour prévisualiser
+// le message sans attendre une vraie nouvelle vidéo.
+// Ne notifie pas @everyone, précise que c'est un test.
+// ============================================================
+function sendTestNotification() {
+  return fetchAllData().then(function (data) {
+    if (!data.videos || data.videos.length === 0) {
+      return { success: false, message: 'Aucune vidéo trouvée (toutes les sources ont échoué).' };
+    }
+
+    var video = data.videos[0];
+    var videoUrl = 'https://www.tiktok.com/@' + TIKTOK_USER + '/video/' + video.id;
+    var coverUrl = pickCoverUrl(video);
+
+    var watchButtonRow = [
+      {
+        type: 1,
+        components: [
+          {
+            type: 2,
+            style: 5,
+            label: 'Regarder la vidéo',
+            url: videoUrl,
+          },
+        ],
+      },
+    ];
+
+    if (DISCORD_WEBHOOK) {
+      var embedPayload = {
+        title: video.desc || 'Nouveau TikTok',
+        url: videoUrl,
+        color: 0xFF0050,
+        footer: { text: 'TikTok Monitor ' + VERSION + ' — Test' },
+        timestamp: new Date().toISOString(),
+      };
+      if (coverUrl) {
+        embedPayload.image = { url: coverUrl };
+      }
+
+      var body = JSON.stringify({
+        content: '\ud83e\uddea **Aper\u00e7u de notification TikTok** (test manuel, pas une vraie nouvelle vid\u00e9o)',
+        embeds: [embedPayload],
+        components: watchButtonRow,
+      });
+
+      return fetch(DISCORD_WEBHOOK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: body,
+      }).then(function (resp) {
+        if (resp.ok) {
+          return { success: true, message: 'Aper\u00e7u envoy\u00e9 via webhook.' };
+        }
+        return sendTestViaChannel(video, videoUrl, coverUrl);
+      }).catch(function () {
+        return sendTestViaChannel(video, videoUrl, coverUrl);
+      });
+    }
+
+    return sendTestViaChannel(video, videoUrl, coverUrl);
+  }).catch(function (e) {
+    return { success: false, message: 'Erreur : ' + e.message };
+  });
+}
+
+function sendTestViaChannel(video, videoUrl, coverUrl) {
+  if (!discordClient) {
+    return Promise.resolve({ success: false, message: 'Bot non initialis\u00e9 (client Discord absent).' });
+  }
+  return discordClient.channels.fetch(CHANNEL_ID).then(function (channel) {
+    if (!channel) return { success: false, message: 'Salon introuvable — ID: ' + CHANNEL_ID };
+
+    var embed = new EmbedBuilder()
+      .setTitle(video.desc || '\ud83c\udfac Nouveau TikTok !')
+      .setURL(videoUrl)
+      .setColor(0xFF0050)
+      .setDescription('@' + TIKTOK_USER + ' vient de poster un nouveau TikTok !')
+      .setFooter({ text: 'TikTok Monitor ' + VERSION + ' — Test' })
+      .setTimestamp();
+
+    if (coverUrl) {
+      embed.setImage(coverUrl);
+    }
+
+    var watchButton = new ButtonBuilder()
+      .setLabel('Regarder la vid\u00e9o')
+      .setStyle(ButtonStyle.Link)
+      .setURL(videoUrl);
+
+    var row = new ActionRowBuilder().addComponents(watchButton);
+
+    return channel.send({
+      content: '\ud83e\uddea **Aper\u00e7u de notification TikTok** (test manuel, pas une vraie nouvelle vid\u00e9o)',
+      embeds: [embed],
+      components: [row],
+    }).then(function () {
+      return { success: true, message: 'Aper\u00e7u envoy\u00e9 dans le salon.' };
+    });
+  }).catch(function (e) {
+    return { success: false, message: 'Erreur : ' + e.message };
   });
 }
 
@@ -483,4 +639,5 @@ function startTikTokMonitor(client) {
 module.exports = {
   startTikTokMonitor: startTikTokMonitor,
   checkFollowers: checkFollowers,
+  sendTestNotification: sendTestNotification,
 };
