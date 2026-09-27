@@ -8888,14 +8888,14 @@ client.on(
 
         .setTimestamp();
 
-    await boostChannel.send({
-      embeds:
-  }).catch(
-    (err) => console.error("[Boost] Erreur envoi message:", err.message)
+      await boostChannel.send({
+        embeds:
+          [embed]
+      }).catch(
+        (err) => console.error("[Boost] Erreur envoi message:", err.message)
+      );
+    }
   );
-    );
-  }
-);
 
 
 // ======================================================
