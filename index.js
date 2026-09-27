@@ -8828,9 +8828,10 @@ client.on(
         BOOST_CHANNEL_NAME
       );
 
-    if (!boostChannel) {
-      return;
-    }
+  if (!boostChannel) {
+    console.error("[Boost] Salon introuvable ! Nom recherché:", BOOST_CHANNEL_NAME);
+    return;
+  }
 
     // Discord inclut le nombre de boosts dans le texte du message
     // système (ex: "a boosté le serveur 2 fois !"). On le récupère si présent.
@@ -8889,9 +8890,9 @@ client.on(
 
     await boostChannel.send({
       embeds:
-        [embed]
-    }).catch(
-      () => {}
+  }).catch(
+    (err) => console.error("[Boost] Erreur envoi message:", err.message)
+  );
     );
   }
 );
