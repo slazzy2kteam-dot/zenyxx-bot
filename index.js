@@ -55,8 +55,8 @@ app.get("/twitch-callback", async (req, res) => {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
-        client_id: process.env.TWITCH_CLIENT_ID || "xclqtr46kv5pucivcndsnjflt39xhj",
-        client_secret: process.env.TWITCH_CLIENT_SECRET || "1wwnttex8byncuvkte5ylsx8vkw3ra",
+client_id: process.env.TWITCH_CLIENT_ID,
+client_secret: process.env.TWITCH_CLIENT_SECRET,
         code,
         grant_type: "authorization_code",
         redirect_uri: TWITCH_REDIRECT_URI
